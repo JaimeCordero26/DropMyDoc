@@ -121,7 +121,7 @@ select.mini { padding: 3px 6px; font-size: 12px; }
         <input id="newMac" placeholder="aa:bb:cc:dd:ee:ff" class="mono" style="width:180px">
         <button id="addDev">Agregar manual</button>
       </div>
-      <div class="note">iPhone usa una MAC privada distinta por red Wi-Fi. En Ajustes → Wi-Fi → (i) → Dirección privada, déjala en "Fija" para que no cambie en esa red. En una red nueva vuelve a aprobarlo desde "Intentos bloqueados".</div>
+      <div class="note">iPhone usa una MAC privada distinta por red Wi-Fi. Con "Aprender MAC al iniciar sesión" activo, cuando entras con usuario y contraseña correctos desde una red nueva, la MAC del dispositivo de ese usuario se actualiza sola. Si está apagado, apruébalo desde "Intentos bloqueados".</div>
     </section>
 
     <section class="card s4">
@@ -130,6 +130,7 @@ select.mini { padding: 3px 6px; font-size: 12px; }
       <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
       <div class="checks">
         <div><label for="ro">Solo lectura</label><input type="checkbox" id="ro"></div>
+        <div><label for="learn" title="Un login correcto desde una MAC desconocida actualiza la MAC del dispositivo del usuario">Aprender MAC al iniciar sesión</label><input type="checkbox" id="learn"></div>
         <div><label for="idle">Auto-apagado sin uso</label>
           <select id="idle">
             <option value="0">nunca</option><option value="5">5 min</option><option value="15">15 min</option>
@@ -144,7 +145,7 @@ select.mini { padding: 3px 6px; font-size: 12px; }
         <thead><tr><th>IP</th><th>MAC</th><th>Intentos</th><th>Último</th><th></th></tr></thead>
         <tbody id="blocked"></tbody>
       </table></div>
-      <div class="note">Si intentas conectar un dispositivo nuevo, aparecerá aquí. Apruébalo y reintenta desde el iPhone.</div>
+      <div class="note">Con "Aprender MAC" apagado, un dispositivo nuevo aparece aquí. Apruébalo y reintenta desde el iPhone.</div>
     </section>
 
     <section class="card s6">
@@ -261,7 +262,7 @@ function render(s) {
   $("devices").innerHTML = s.devices.length ? s.devices.map((d) => {
     const cls = d.connected ? "on" : d.reachable ? "warn" : "off";
     const txt = d.connected ? "conectado" : d.reachable ? "en la red" : "fuera";
-    return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.mac)}</td>
+    return `<tr><td>${esc(d.name)}${d.network ? `<div class="sub">red: ${esc(d.network)}</div>` : ""}</td><td class="mono">${esc(d.mac)}</td>
       <td><span class="pill ${cls}">${txt}</span></td><td class="mono">${esc(d.ip || "—")}</td>
       <td>${d.users.length ? d.users.map((u) => `<span class="chip">${esc(u)}</span>`).join("") : '<span class="sub">todos</span>'}</td>
       <td>${ago(d.last_seen)}</td><td>${bytes(d.traffic.up)} / ${bytes(d.traffic.down)}</td>
@@ -296,7 +297,7 @@ function render(s) {
 
   const c = s.checks;
   const checks = [
-    ["Firewall: solo MAC autorizadas", c.firewall],
+    [c.learn_mac ? "Firewall IPv4/IPv6: MAC nuevas solo con login" : "Firewall IPv4/IPv6: solo MAC autorizadas", c.firewall],
     ["Hay usuarios SMB activos", c.samba_user],
     ["Invitados deshabilitados", c.guest_disabled],
     ["SMB3 mínimo, NTLMv2", c.smb3],
@@ -308,6 +309,7 @@ function render(s) {
     `<div><span>${esc(l)}</span><span class="pill ${v ? "on" : "bad"}">${v ? "OK" : "revisar"}</span></div>`).join("");
   if (document.activeElement !== $("idle")) $("idle").value = String(s.settings.idle_minutes);
   $("ro").checked = s.settings.read_only;
+  $("learn").checked = s.settings.learn_mac;
 
   $("recent").innerHTML = s.folder.recent.length ? s.folder.recent.map((f) =>
     `<tr><td class="mono">${esc(f.name)}</td><td>${bytes(f.size)}</td><td>${ago(f.t)}</td></tr>`).join("")
@@ -377,6 +379,7 @@ $("toggle").onclick = () => act("share", { on: !S.running });
 $("panic").onclick = () => act("panic", {});
 $("clearBlocked").onclick = () => act("blocked/clear", {});
 $("ro").onchange = (e) => act("settings", { read_only: e.target.checked });
+$("learn").onchange = (e) => act("settings", { learn_mac: e.target.checked });
 $("idle").onchange = (e) => act("settings", { idle_minutes: Number(e.target.value) });
 $("addDev").onclick = () => act("devices/add", { mac: $("newMac").value, name: $("newName").value })
   .then(() => { $("newMac").value = ""; $("newName").value = ""; });

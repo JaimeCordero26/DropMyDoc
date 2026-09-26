@@ -4,8 +4,8 @@ Una carpeta de tu laptop compartida por SMB para abrirla desde la app **Archivos
 
 ## Cómo protege el acceso
 
-1. **Firewall por MAC.** El puerto 445 solo acepta conexiones nuevas de las MAC que están en la whitelist. Todo lo demás se descarta y se registra como "intento bloqueado".
-2. **Samba `hosts allow`.** Solo acepta la subred local actual; el panel la regenera cuando cambias de red.
+1. **Firewall por MAC (IPv4 e IPv6).** El puerto 445 acepta conexiones nuevas de las MAC que están en la whitelist, con reglas en `iptables` y en `ip6tables`. Con **Aprender MAC** activo (por defecto), una MAC desconocida también llega a Samba, con límite de 10 conexiones nuevas por minuto por IP, pero solo se queda si entra con usuario y contraseña correctos (ver abajo). Con esa opción apagada, todo lo que no está en la whitelist se descarta y se registra como "intento bloqueado".
+2. **Samba `hosts allow`.** Solo acepta las subredes locales actuales (IPv4 e IPv6); el panel las regenera cuando cambias de red.
 3. **Un usuario SMB por dispositivo o persona** (`iphone`, `windows`, `t14`…), cada uno con su contraseña. Invitados deshabilitados, SMB3 como mínimo y solo NTLMv2.
 4. **Vínculo usuario ↔ dispositivo.** Si a un usuario le vinculas dispositivos, Samba (`root preexec`) rechaza la conexión cuando la MAC de origen no es una de ellos. Así, aunque alguien consiga la contraseña del iPhone, no puede usarla desde otro equipo.
 5. **Encendido bajo demanda.** `smbd` no arranca con el sistema. El panel lo apaga solo tras N minutos sin sesiones (30 por defecto).
@@ -19,7 +19,7 @@ Una carpeta de tu laptop compartida por SMB para abrirla desde la app **Archivos
 - Sesiones activas: dialecto SMB, cifrado, firma y archivos abiertos. Se pueden expulsar.
 - Actividad de archivos (abrió, escribió, renombró, borró) sacada de `vfs_full_audit`.
 - Logins correctos y fallidos (`auth_audit`) y eventos.
-- Ajustes: solo lectura, auto-apagado y botón de **pánico** (expulsa a todos y apaga).
+- Ajustes: solo lectura, aprender MAC, auto-apagado y botón de **pánico** (expulsa a todos y apaga).
 
 ## Estructura
 
@@ -97,12 +97,23 @@ Cada usuario SMB es un usuario Unix de sistema, sin login ni home, del grupo `dr
 2. `dmd on`
 3. **iPhone:** Archivos → **···** → *Conectarse al servidor* → `smb://<host>.local` o `smb://<ip>` → *Usuario registrado* → `iphone` y su contraseña.
    **Windows:** Explorador → `\\<host>.local\DropMyDoc`, o *Conectar a unidad de red*, con el usuario y la contraseña.
-4. El primer intento de un dispositivo nuevo falla a propósito. Aparece en **Intentos bloqueados**; lo apruebas y vuelves a intentar.
-5. Opcional: vincula el dispositivo a su usuario para que esa contraseña solo funcione desde él.
+4. Listo. Con **Aprender MAC** activo, el primer login correcto registra la MAC del dispositivo y la vincula a su usuario. Con la opción apagada, el primer intento falla a propósito, aparece en **Intentos bloqueados** y lo apruebas.
+
+## Cambiar de red
+
+iOS usa una **MAC privada distinta en cada red Wi-Fi**, así que en cada red nueva el iPhone llega con otra MAC. Con **Aprender MAC** activo no hay que aprobar nada: `dmd on`, conectas desde Archivos y, como el usuario y la contraseña son correctos, `panel.py --check`:
+
+- si el usuario tiene **un** dispositivo vinculado, le cambia la MAC por la nueva;
+- si no tiene ninguno, crea el dispositivo y se lo vincula;
+- si tiene varios, agrega uno nuevo con el nombre de la red.
+
+Un login fallido desde una MAC desconocida no registra nada. Una MAC que ya pertenece a otro dispositivo no se reasigna. Si prefieres aprobar cada dispositivo a mano, apaga **Aprender MAC** en el panel; entonces la contraseña ya no basta para entrar desde un equipo nuevo.
 
 Notas:
 
-- iOS usa una **MAC privada distinta en cada red Wi-Fi**. En Ajustes → Wi-Fi → (i) → Dirección privada, elige **Fija** para que no cambie dentro de esa red. En una red nueva hay que aprobarlo una vez más.
+- En Ajustes → Wi-Fi → (i) → Dirección privada, deja **Fija** para que la MAC no rote dentro de una misma red.
+- En redes con IPv6 (la mayoría de las de casa) el iPhone suele conectarse por IPv6; por eso el firewall y `hosts allow` cubren ambos.
+- Si tienes Docker, el módulo de NixOS le dice a Avahi que no anuncie `docker0`; si no, `<host>.local` apuntaría a `172.17.0.1` y el iPhone no llegaría.
 - Muchas redes públicas o universitarias aíslan a los clientes entre sí. Si el iPhone no llega a la laptop, usa el hotspot del teléfono.
 
 ## Desarrollo

@@ -28,15 +28,17 @@ smbd_unit() {
 if [ "${1:-}" = "--uninstall" ]; then
   systemctl disable --now dropmydoc 2>/dev/null || true
   systemctl stop "$(smbd_unit)" 2>/dev/null || true
-  for c in INPUT OUTPUT; do
-    while iptables -S "$c" | grep -q dropmydoc; do
-      rule=$(iptables -S "$c" | grep dropmydoc | head -1 | sed 's/^-A /-D /')
-      eval iptables "$rule"
+  for ipt in iptables ip6tables; do
+    for c in INPUT OUTPUT; do
+      while $ipt -S "$c" 2>/dev/null | grep -q dropmydoc; do
+        rule=$($ipt -S "$c" | grep dropmydoc | head -1 | sed 's/^-A /-D /')
+        eval $ipt "$rule"
+      done
     done
-  done
-  for ch in dropmydoc dropmydoc-acct-in dropmydoc-acct-out; do
-    iptables -F "$ch" 2>/dev/null || true
-    iptables -X "$ch" 2>/dev/null || true
+    for ch in dropmydoc dropmydoc-acct-in dropmydoc-acct-out; do
+      $ipt -F "$ch" 2>/dev/null || true
+      $ipt -X "$ch" 2>/dev/null || true
+    done
   done
   rm -rf "$PREFIX" "$UNIT_FILE" /usr/local/bin/dmd
   systemctl daemon-reload
@@ -58,7 +60,7 @@ GROUP=$(id -gn "$USER_NAME")
 HOSTNAME_=$(hostname)
 UNIT=$(smbd_unit)
 
-for bin in python3 iptables ip curl jq journalctl useradd smbpasswd; do
+for bin in python3 iptables ip6tables ip curl jq journalctl useradd smbpasswd; do
   command -v "$bin" >/dev/null || die "falta '$bin' (Arch: pacman -S --needed python iptables-nft iproute2 curl jq)"
 done
 
@@ -106,7 +108,7 @@ $MARK
   valid users = @dropmydoc
   force user = $USER_NAME
   force group = $GROUP
-  root preexec = $(command -v python3) $PREFIX/panel.py --check %U %I
+  root preexec = /usr/bin/env PATH=$(dirname "$(command -v ip)"):/usr/bin:/bin $(command -v python3) $PREFIX/panel.py --check %U %I
   root preexec close = yes
   guest ok = no
   browseable = yes

@@ -75,7 +75,8 @@ in {
           "force user" = cfg.user;
           "force group" = config.users.users.${cfg.user}.group;
           # rechaza usuarios deshabilitados o que entran desde un dispositivo no vinculado
-          "root preexec" = "${pkgs.python3}/bin/python3 ${../panel/panel.py} --check %U %I";
+          # (necesita `ip` para ver la MAC de clientes IPv4 e IPv6)
+          "root preexec" = "${pkgs.coreutils}/bin/env PATH=${pkgs.iproute2}/bin ${pkgs.python3}/bin/python3 ${../panel/panel.py} --check %U %I";
           "root preexec close" = "yes";
           "guest ok" = "no";
           "browseable" = "yes";
@@ -106,6 +107,10 @@ in {
       after = ["dropmydoc.service"];
       wants = ["dropmydoc.service"];
     };
+
+    # Avahi anunciaría <host>.local con la IP de docker0 (172.17.0.1), que los
+    # dispositivos de la red no alcanzan.
+    services.avahi.denyInterfaces = lib.mkIf config.services.avahi.enable ["docker0"];
 
     users.groups.dropmydoc = {};
 

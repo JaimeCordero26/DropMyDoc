@@ -6,7 +6,12 @@ se escribe en /run/dropmydoc/token, legible solo por el usuario dueño.
 
 Con `--check USUARIO IP` actúa como `root preexec` de Samba: permite o rechaza
 la conexión según el usuario esté habilitado y, si tiene dispositivos
-vinculados, según la MAC de la IP que se conecta.
+vinculados, según la MAC de la IP que se conecta. Con "aprender MAC" activo, un
+login correcto desde una MAC desconocida (p. ej. la MAC privada que iOS usa en
+cada red Wi-Fi) actualiza la MAC del dispositivo de ese usuario en vez de pedir
+aprobación manual.
+
+Funciona igual por IPv4 e IPv6: las reglas se aplican con iptables e ip6tables.
 """
 
 import grp
@@ -51,6 +56,10 @@ ACCT_IN = "dropmydoc-acct-in"
 ACCT_OUT = "dropmydoc-acct-out"
 LOG_PREFIX = "DROPMYDOC-DENY "
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+IPTABLES = ("iptables", "ip6tables")
+# conexiones nuevas por IP desde MAC desconocidas cuando se aprende la MAC al hacer login
+LEARN_LIMIT = ["--hashlimit-upto", "10/min", "--hashlimit-burst", "10",
+               "--hashlimit-mode", "srcip", "--hashlimit-name", "dropmydoc"]
 
 lock = threading.RLock()
 TOKEN = secrets.token_urlsafe(32)
@@ -81,7 +90,7 @@ def default_state():
     return {
         "devices": [],
         "users": [],
-        "settings": {"idle_minutes": 30, "read_only": False},
+        "settings": {"idle_minutes": 30, "read_only": False, "learn_mac": True},
         "events": [],
         "traffic": {},
     }
@@ -109,8 +118,9 @@ runtime = {
     "activity": deque(maxlen=300),
     "auth": deque(maxlen=100),
     "folder": {"size": 0, "files": 0, "recent": [], "at": 0},
-    "net": {"addresses": [], "subnets": [], "ssid": None, "ifaces": []},
-    "neigh": {},  # mac -> ip
+    "net": {"addresses": [], "subnets": [], "subnets6": [], "ssid": None, "ifaces": []},
+    "neigh": {},  # mac -> ip (IPv4 si hay, si no IPv6)
+    "neigh_ips": {},  # mac -> [todas sus IPs, v4 y v6]
     "fw_ok": False,
     "acct_prev": {},
 }
@@ -149,8 +159,28 @@ def user_stats(u):
 # ---------------------------------------------------------------- red
 
 
+def clean_ip(ip):
+    """Normaliza la IP que da Samba: sin zona (%iface) ni prefijo IPv4-mapeado."""
+    ip = (ip or "").split("%", 1)[0].strip("[]")
+    return ip[7:] if ip.startswith("::ffff:") and "." in ip else ip
+
+
+def read_neigh():
+    """mac -> [ips] a partir de la tabla de vecinos IPv4 e IPv6."""
+    out = {}
+    try:
+        data = json.loads(run("ip", "-j", "neigh") or "[]")
+    except ValueError:
+        data = []
+    for n in data:
+        mac = (n.get("lladdr") or "").lower()
+        if mac and "FAILED" not in n.get("state", []) and n.get("dst"):
+            out.setdefault(mac, []).append(n["dst"])
+    return out
+
+
 def refresh_net():
-    addrs, subnets, ifaces = [], [], []
+    addrs, subnets, subnets6, ifaces = [], [], [], []
     try:
         data = json.loads(run("ip", "-j", "addr") or "[]")
     except ValueError:
@@ -162,26 +192,32 @@ def refresh_net():
         if "UP" not in itf.get("flags", []):
             continue
         for a in itf.get("addr_info", []):
-            if a.get("family") != "inet":
-                continue
-            addrs.append(a["local"])
-            subnets.append(str(ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}").network))
-            ifaces.append(name)
+            net = str(ipaddress.ip_interface(f"{a['local']}/{a['prefixlen']}").network)
+            if a.get("family") == "inet":
+                addrs.append(a["local"])
+                subnets.append(net)
+                ifaces.append(name)
+            elif a.get("family") == "inet6" and a.get("scope") == "global" and a["prefixlen"] < 128:
+                subnets6.append(net)
     ssid = None
     for line in (run("nmcli", "-t", "-f", "active,ssid", "dev", "wifi") or "").splitlines():
         if line.startswith("yes:"):
             ssid = line[4:] or None
+    neigh_ips = read_neigh()
     neigh = {}
-    try:
-        for n in json.loads(run("ip", "-j", "-4", "neigh") or "[]"):
-            mac = (n.get("lladdr") or "").lower()
-            if mac and "FAILED" not in n.get("state", []):
-                neigh[mac] = n["dst"]
-    except ValueError:
-        pass
+    for mac, ips in neigh_ips.items():
+        neigh[mac] = next((i for i in ips if ":" not in i), ips[0])
     with lock:
-        runtime["net"] = {"addresses": addrs, "subnets": subnets, "ssid": ssid, "ifaces": ifaces}
+        runtime["net"] = {"addresses": addrs, "subnets": subnets, "subnets6": sorted(set(subnets6)),
+                          "ssid": ssid, "ifaces": ifaces}
         runtime["neigh"] = neigh
+        runtime["neigh_ips"] = neigh_ips
+
+
+def mac_of_ip(ip):
+    ip = clean_ip(ip)
+    with lock:
+        return next((m for m, ips in runtime["neigh_ips"].items() if ip in ips), None)
 
 
 # ---------------------------------------------------------------- firewall
@@ -191,88 +227,103 @@ def fw_rules():
     rules = []
     for d in state["devices"]:
         rules.append(["-m", "mac", "--mac-source", d["mac"], "-j", "ACCEPT"])
+    if state["settings"].get("learn_mac"):
+        # MAC desconocida: pasa a Samba (con límite de ritmo) y solo se queda si el login es correcto
+        rules.append(["-m", "hashlimit", *LEARN_LIMIT, "-j", "ACCEPT"])
     rules.append(["-m", "limit", "--limit", "20/min", "--limit-burst", "10",
                   "-j", "LOG", "--log-level", "info", "--log-prefix", LOG_PREFIX])
     rules.append(["-j", "DROP"])
     return rules
 
 
-def ensure_chain(name):
-    if not ok("iptables", "-n", "-L", name):
-        run("iptables", "-N", name)
+def ensure_chain(ipt, name):
+    if not ok(ipt, "-n", "-L", name):
+        run(ipt, "-N", name)
 
 
-def ensure_jump(parent, spec):
-    if not ok("iptables", "-C", parent, *spec):
-        run("iptables", "-I", parent, "1", *spec)
+def ensure_jump(ipt, parent, spec):
+    if not ok(ipt, "-C", parent, *spec):
+        run(ipt, "-I", parent, "1", *spec)
 
 
 _fw_applied = {"key": None, "dump": None}
+
+
+def fw_dump():
+    return "".join(run(ipt, "-S", c) for ipt in IPTABLES for c in (CHAIN, ACCT_IN, ACCT_OUT))
 
 
 def sync_firewall():
     with lock:
         rules = fw_rules()
         macs = [d["mac"] for d in state["devices"]]
-        ips = sorted({runtime["neigh"][m] for m in macs if m in runtime["neigh"]})
-    for c in (CHAIN, ACCT_IN, ACCT_OUT):
-        ensure_chain(c)
+        ips = sorted({ip for m in macs for ip in runtime["neigh_ips"].get(m, [])})
+    for ipt in IPTABLES:
+        for c in (CHAIN, ACCT_IN, ACCT_OUT):
+            ensure_chain(ipt, c)
 
     key = json.dumps([rules, macs, ips])
-    dump = run("iptables", "-S", CHAIN) + run("iptables", "-S", ACCT_IN) + run("iptables", "-S", ACCT_OUT)
-    if key != _fw_applied["key"] or dump != _fw_applied["dump"]:
+    if key != _fw_applied["key"] or fw_dump() != _fw_applied["dump"]:
         harvest_traffic()
-        for c in (CHAIN, ACCT_IN, ACCT_OUT):
-            run("iptables", "-F", c)
-        for r in rules:
-            run("iptables", "-A", CHAIN, *r)
-        for m in macs:
-            run("iptables", "-A", ACCT_IN, "-m", "mac", "--mac-source", m, "-j", "RETURN")
-        for ip in ips:
-            run("iptables", "-A", ACCT_OUT, "-d", ip, "-j", "RETURN")
+        for ipt in IPTABLES:
+            v6 = ipt == "ip6tables"
+            for c in (CHAIN, ACCT_IN, ACCT_OUT):
+                run(ipt, "-F", c)
+            for r in rules:
+                run(ipt, "-A", CHAIN, *r)
+            for m in macs:
+                run(ipt, "-A", ACCT_IN, "-m", "mac", "--mac-source", m, "-j", "RETURN")
+            for ip in ips:
+                if (":" in ip) == v6:
+                    run(ipt, "-A", ACCT_OUT, "-d", ip, "-j", "RETURN")
         runtime["acct_prev"] = {}
         _fw_applied["key"] = key
-        _fw_applied["dump"] = run("iptables", "-S", CHAIN) + run("iptables", "-S", ACCT_IN) + run("iptables", "-S", ACCT_OUT)
+        _fw_applied["dump"] = fw_dump()
 
     new445 = ["-p", "tcp", "--dport", "445", "-m", "conntrack", "--ctstate", "NEW", "-j", CHAIN]
-    parent = "nixos-fw" if ok("iptables", "-n", "-L", "nixos-fw") else "INPUT"
-    ensure_jump(parent, new445)
-    ensure_jump("INPUT", ["-p", "tcp", "--dport", "445", "-j", ACCT_IN])
-    ensure_jump("OUTPUT", ["-p", "tcp", "--sport", "445", "-j", ACCT_OUT])
+    fw_ok = True
+    for ipt in IPTABLES:
+        parent = "nixos-fw" if ok(ipt, "-n", "-L", "nixos-fw") else "INPUT"
+        ensure_jump(ipt, parent, new445)
+        ensure_jump(ipt, "INPUT", ["-p", "tcp", "--dport", "445", "-j", ACCT_IN])
+        ensure_jump(ipt, "OUTPUT", ["-p", "tcp", "--sport", "445", "-j", ACCT_OUT])
+        fw_ok = fw_ok and ok(ipt, "-C", parent, *new445)
     with lock:
-        runtime["fw_ok"] = ok("iptables", "-C", parent, *new445)
+        runtime["fw_ok"] = fw_ok
 
 
 def harvest_traffic():
-    """Suma los contadores de iptables a los totales persistentes por MAC."""
+    """Suma los contadores de iptables/ip6tables a los totales persistentes por MAC."""
     with lock:
-        ip_to_mac = {ip: m for m, ip in runtime["neigh"].items()}
+        ip_to_mac = {ip: m for m, ips in runtime["neigh_ips"].items() for ip in ips}
         mac_to_user = {s["mac"]: s["user"] for s in runtime["sessions"] if s["mac"]}
         prev = runtime["acct_prev"]
-        for chain, direction in ((ACCT_IN, "up"), (ACCT_OUT, "down")):
-            out = run("iptables", "-L", chain, "-v", "-x", "-n") or ""
-            for line in out.splitlines()[2:]:
-                parts = line.split()
-                if len(parts) < 9:
-                    continue
-                nbytes = int(parts[1])
-                if direction == "up":
-                    m = re.search(r"MAC\s*([0-9A-Fa-f:]{17})", line)
-                    mac = m.group(1).lower() if m else None
-                else:
-                    mac = ip_to_mac.get(parts[8])
-                if not mac:
-                    continue
-                k = f"{chain}|{mac}"
-                delta = nbytes - prev.get(k, 0)
-                if delta < 0:
-                    delta = nbytes
-                prev[k] = nbytes
-                t = state["traffic"].setdefault(mac, {"up": 0, "down": 0})
-                t[direction] += delta
-                u = smb_user(mac_to_user.get(mac))
-                if u and delta:
-                    user_stats(u)[direction] += delta
+        for ipt in IPTABLES:
+            for chain, direction in ((ACCT_IN, "up"), (ACCT_OUT, "down")):
+                out = run(ipt, "-L", chain, "-v", "-x", "-n") or ""
+                for line in out.splitlines()[2:]:
+                    parts = line.split()
+                    if len(parts) < 3 or not parts[1].isdigit():
+                        continue
+                    nbytes = int(parts[1])
+                    if direction == "up":
+                        m = re.search(r"MAC\s*([0-9A-Fa-f:]{17})", line)
+                        mac = m.group(1).lower() if m else None
+                    else:
+                        mac = next((ip_to_mac[p.split("/")[0]] for p in parts[2:]
+                                    if p.split("/")[0] in ip_to_mac), None)
+                    if not mac:
+                        continue
+                    k = f"{ipt}|{chain}|{mac}"
+                    delta = nbytes - prev.get(k, 0)
+                    if delta < 0:
+                        delta = nbytes
+                    prev[k] = nbytes
+                    t = state["traffic"].setdefault(mac, {"up": 0, "down": 0})
+                    t[direction] += delta
+                    u = smb_user(mac_to_user.get(mac))
+                    if u and delta:
+                        user_stats(u)[direction] += delta
 
 
 # ---------------------------------------------------------------- samba
@@ -280,11 +331,11 @@ def harvest_traffic():
 
 def write_samba_conf():
     with lock:
-        subnets = runtime["net"]["subnets"]
+        subnets = runtime["net"]["subnets"] + runtime["net"]["subnets6"]
         ro = state["settings"]["read_only"]
         disabled = [u["name"] for u in state["users"] if not u.get("enabled", True)]
         readers = [u["name"] for u in state["users"] if u.get("perm") == "ro"]
-    g = f"hosts allow = 127.0.0.1 {' '.join(subnets)}\nhosts deny = ALL\n"
+    g = f"hosts allow = 127.0.0.1 ::1 fe80::/10 {' '.join(subnets)}\nhosts deny = ALL\n"
     s = f"read only = {'yes' if ro else 'no'}\n"
     if disabled:
         s += f"invalid users = {' '.join(disabled)}\n"
@@ -339,14 +390,14 @@ def refresh_sessions():
     for s in (data.get("sessions", {}) or {}).values():
         pid = str((s.get("server_id") or {}).get("pid", ""))
         rip = s.get("remote_machine") or s.get("hostname") or ""
-        m = re.match(r"ipv4:([\d.]+):", s.get("hostname", "") or "")
-        ip = m.group(1) if m else rip
+        m = re.match(r"ipv[46]:\[?(.+?)\]?:\d+$", s.get("hostname", "") or "")
+        ip = clean_ip(m.group(1) if m else rip)
         nfiles = sum(
             1 for f in opens.values()
             for o in (f.get("opens") or {}).values()
             if str((o.get("server_id") or {}).get("pid", "")) == pid
         )
-        mac = next((mc for mc, i in runtime["neigh"].items() if i == ip), None)
+        mac = mac_of_ip(ip)
         d = device(mac) if mac else None
         sessions.append({
             "pid": pid,
@@ -501,7 +552,7 @@ def on_audit(entry):
                 user_stats(u)[key] += 1
 
 
-AUTH_RE = re.compile(r"user \[[^\]]*\]\\\[([^\]]*)\].*status \[(\w+)\].*remote host \[ipv4:([\d.]+):")
+AUTH_RE = re.compile(r"user \[[^\]]*\]\\\[([^\]]*)\].*status \[(\w+)\].*remote host \[ipv[46]:\[?([0-9a-fA-F.:%\w]+?)\]?:\d+\]")
 
 
 def on_smbd(entry):
@@ -509,6 +560,7 @@ def on_smbd(entry):
     if not m:
         return
     user, status, ip = m.groups()
+    ip = clean_ip(ip)
     with lock:
         runtime["auth"].append({"t": now(), "user": user, "ip": ip, "ok": status == "NT_STATUS_OK", "status": status})
         u = smb_user(user)
@@ -525,12 +577,48 @@ def on_smbd(entry):
 
 
 def on_check(entry):
-    # DENY|usuario|ip|mac|motivo  (lo escribe `panel.py --check`)
+    # DENY|LEARN|ALLOW + |usuario|ip|mac|motivo  (lo escribe `panel.py --check`)
     parts = msg_of(entry).split("|")
-    if len(parts) < 5 or parts[0] != "DENY":
+    if len(parts) < 5:
         return
-    _, user, ip, mac, reason = parts[:5]
-    event("auth", f"Conexión rechazada a '{user}' desde {ip} {mac}: {reason}")
+    verdict, user, ip, mac, reason = parts[:5]
+    if verdict == "DENY":
+        event("auth", f"Conexión rechazada a '{user}' desde {ip} {mac}: {reason}")
+    elif verdict == "LEARN":
+        learn_mac(user, mac)
+
+
+def learn_mac(user, mac):
+    """Login correcto desde una MAC desconocida: la asocia al dispositivo del usuario.
+
+    Si el usuario tiene un solo dispositivo vinculado, se le cambia la MAC (iOS usa
+    una MAC privada distinta en cada red). Si no tiene ninguno, se crea uno y se
+    vincula; si tiene varios, se agrega uno nuevo con el nombre de la red.
+    """
+    with lock:
+        u = smb_user(user)
+        if not u or not MAC_RE.match(mac) or device(mac):
+            return
+        ssid = runtime["net"]["ssid"]
+        linked = [d for d in (device(m) for m in u.get("devices", [])) if d]
+        if len(linked) == 1:
+            d = linked[0]
+            old = d["mac"]
+            d["mac"] = mac
+            u["devices"] = sorted({mac if m == old else m for m in u["devices"]})
+            state["traffic"][mac] = state["traffic"].pop(old, {"up": 0, "down": 0})
+            msg = f"MAC actualizada: {d['name']} {old} → {mac}"
+        else:
+            name = u.get("label") or u["name"]
+            if linked and ssid:
+                name = f"{name} ({ssid})"
+            d = {"mac": mac, "name": name[:40], "added": now(), "last_seen": now(), "last_ip": None}
+            state["devices"].append(d)
+            u["devices"] = sorted(set(u.get("devices", [])) | {mac})
+            msg = f"Dispositivo aprendido: {d['name']} ({mac}) al entrar como '{u['name']}'"
+        d["network"] = ssid
+        runtime["blocked"].pop(mac, None)
+    event("device", msg + (f" en la red {ssid}" if ssid else ""))
 
 
 # ---------------------------------------------------------------- usuarios
@@ -597,24 +685,37 @@ def check_main(user, ip):
     """root preexec de Samba: exit 0 permite, exit 1 corta la conexión."""
     syslog.openlog(CHECK_TAG, 0, syslog.LOG_AUTH)
     user = user.lower()
+    ip = clean_ip(ip)
     u = smb_user(user)
-    mac = ""
-    try:
-        with open("/proc/net/arp") as f:
-            for line in f.readlines()[1:]:
-                cols = line.split()
-                if len(cols) >= 4 and cols[0] == ip:
-                    mac = cols[3].lower()
-    except OSError:
-        pass
-    reason = None
+    mac = next((m for m, ips in read_neigh().items() if ip in ips), "")
+    if not mac:
+        try:
+            with open("/proc/net/arp") as f:
+                for line in f.readlines()[1:]:
+                    cols = line.split()
+                    if len(cols) >= 4 and cols[0] == ip:
+                        mac = cols[3].lower()
+        except OSError:
+            pass
+    local = ip in ("127.0.0.1", "::1")
+    verdict, reason = "ALLOW", None
     if not u:
         reason = "usuario no gestionado por dropmydoc"
     elif not u.get("enabled", True):
         reason = "usuario deshabilitado"
-    elif u.get("devices") and ip != "127.0.0.1" and mac not in u["devices"]:
+    elif local:
+        pass
+    elif not device(mac):
+        # el firewall solo deja pasar MAC desconocidas si "aprender MAC" está activo
+        if state["settings"].get("learn_mac") and MAC_RE.match(mac):
+            verdict = "LEARN"
+        else:
+            reason = "dispositivo no autorizado"
+    elif u.get("devices") and mac not in u["devices"]:
         reason = "dispositivo no vinculado a este usuario"
-    syslog.syslog(syslog.LOG_NOTICE, f"{'DENY' if reason else 'ALLOW'}|{user}|{ip}|{mac}|{reason or ''}")
+    if reason:
+        verdict = "DENY"
+    syslog.syslog(syslog.LOG_NOTICE, f"{verdict}|{user}|{ip}|{mac}|{reason or ''}")
     sys.exit(1 if reason else 0)
 
 
@@ -708,6 +809,7 @@ def snapshot():
             "folder": runtime["folder"],
             "checks": {
                 "firewall": runtime["fw_ok"],
+                "learn_mac": state["settings"]["learn_mac"],
                 "samba_user": any(u.get("enabled", True) for u in state["users"]),
                 "whitelist_only": True,
                 "smb3": True,
@@ -857,8 +959,12 @@ def api(method, path, body):
                 s["idle_minutes"] = max(0, min(24 * 60, int(body["idle_minutes"])))
             if "read_only" in body:
                 s["read_only"] = bool(body["read_only"])
+            if "learn_mac" in body:
+                s["learn_mac"] = bool(body["learn_mac"])
         write_samba_conf()
-        event("settings", f"Ajustes: solo lectura={'sí' if s['read_only'] else 'no'}, auto-apagado={s['idle_minutes']} min")
+        sync_firewall()
+        event("settings", f"Ajustes: solo lectura={'sí' if s['read_only'] else 'no'}, "
+                          f"aprender MAC={'sí' if s['learn_mac'] else 'no'}, auto-apagado={s['idle_minutes']} min")
         return 200, s
 
     if path == "/api/panic":
