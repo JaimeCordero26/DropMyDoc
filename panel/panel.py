@@ -652,7 +652,7 @@ def create_user(name, label, perm, password):
         created = True
         if not ok("useradd", "--system", "--no-create-home", "--home-dir", "/var/empty",
                   "--shell", nologin_shell(), "--gid", SMB_GROUP,
-                  "--comment", f"dropmydoc: {label}", name):
+                  "--comment", "dropmydoc " + re.sub(r"[:,\n]", " ", label), name):
             return "no se pudo crear el usuario del sistema"
     if not set_smb_password(name, password):
         if created:
