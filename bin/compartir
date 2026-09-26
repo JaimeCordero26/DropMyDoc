@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Control de la carpeta compartida desde la terminal. Habla con el panel local.
+set -eu
+
+PORT="${FILESHARE_PORT:-8445}"
+TOKEN_FILE="${FILESHARE_TOKEN:-/run/fileshare/token}"
+API="http://127.0.0.1:${PORT}/api"
+
+if [ ! -r "$TOKEN_FILE" ]; then
+  echo "El panel (fileshare-panel.service) no está corriendo o no puedes leer $TOKEN_FILE." >&2
+  exit 1
+fi
+TOKEN=$(cat "$TOKEN_FILE")
+
+call() {
+  curl -fsS -H "X-Token: $TOKEN" -H "Content-Type: application/json" "$@"
+}
+
+case "${1:-status}" in
+  on)
+    call -X POST -d '{"on":true}' "$API/share" >/dev/null
+    echo "Carpeta compartida ENCENDIDA"
+    call "$API/state" | jq -r '.addresses[] | "  " + .'
+    ;;
+  off)
+    call -X POST -d '{"on":false}' "$API/share" >/dev/null
+    echo "Carpeta compartida APAGADA"
+    ;;
+  panel)
+    xdg-open "http://127.0.0.1:${PORT}/#t=$TOKEN" >/dev/null 2>&1 &
+    ;;
+  status)
+    call "$API/state" | jq -r '
+      "Estado:       " + (if .running then "ENCENDIDA" else "apagada" end),
+      "Carpeta:      " + .share_path,
+      "Direcciones:  " + (.addresses | join("  ")),
+      "Autorizados:  " + (.devices | length | tostring),
+      "Sesiones:     " + (.sessions | length | tostring),
+      "Bloqueados:   " + (.blocked | length | tostring)'
+    ;;
+  *)
+    echo "uso: compartir [on|off|status|panel]" >&2
+    exit 2
+    ;;
+esac

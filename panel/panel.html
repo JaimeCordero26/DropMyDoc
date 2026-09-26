@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carpeta compartida</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea; --text: #16191d; --muted: #6b7380;
+  --accent: #2563eb; --ok: #15803d; --ok-bg: #dcfce7; --warn: #b45309; --warn-bg: #fef3c7;
+  --bad: #b91c1c; --bad-bg: #fee2e2; --chip: #eef1f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115; --panel: #171a20; --line: #262b33; --text: #e7e9ec; --muted: #8b93a1;
+    --accent: #60a5fa; --ok: #4ade80; --ok-bg: #12301f; --warn: #fbbf24; --warn-bg: #33270d;
+    --bad: #f87171; --bad-bg: #3a1717; --chip: #20242c;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+.sub { color: var(--muted); font-size: 13px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.on { color: var(--ok); background: var(--ok-bg); }
+.off { color: var(--muted); background: var(--chip); }
+.warn { color: var(--warn); background: var(--warn-bg); }
+.bad { color: var(--bad); background: var(--bad-bg); }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; border-radius: 8px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+button.big { padding: 10px 20px; font-weight: 600; font-size: 15px; }
+input, select { font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+.s12 { grid-column: span 12; } .s8 { grid-column: span 8; } .s6 { grid-column: span 6; } .s4 { grid-column: span 4; }
+@media (max-width: 900px) { .s8, .s6, .s4 { grid-column: span 12; } }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.tile .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--muted); font-size: 12px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+tr:last-child td { border-bottom: 0; }
+.mono { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 12.5px; }
+.empty { color: var(--muted); padding: 10px 0; }
+.addr { display: flex; flex-wrap: wrap; gap: 8px; }
+.addr code { background: var(--chip); padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+.feed { max-height: 320px; overflow: auto; }
+.feed div { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
+.feed time { color: var(--muted); flex: none; width: 64px; font-variant-numeric: tabular-nums; }
+.checks { display: grid; gap: 8px; }
+.checks div { display: flex; justify-content: space-between; gap: 8px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.scroll { overflow-x: auto; }
+.note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+#login { max-width: 460px; margin: 15vh auto; }
+</style>
+</head>
+<body>
+<main id="app" hidden>
+  <header>
+    <div>
+      <h1>Carpeta compartida <span id="status" class="pill off">—</span></h1>
+      <div class="sub" id="subtitle"></div>
+    </div>
+    <div class="row">
+      <button class="danger" id="panic" title="Cierra todas las sesiones y apaga">Pánico</button>
+      <button class="big primary" id="toggle">Encender</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card s12">
+      <h2>Conectar desde iPhone</h2>
+      <div class="sub" style="margin-bottom:10px">Archivos → ··· → Conectarse al servidor → pega una dirección → Usuario registrado: <b id="uname"></b> + contraseña SMB.</div>
+      <div class="addr" id="addrs"></div>
+    </section>
+
+    <section class="s12 tiles" id="tiles"></section>
+
+    <section class="card s8">
+      <h2>Dispositivos autorizados</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Nombre</th><th>MAC</th><th>Estado</th><th>IP</th><th>Último uso</th><th>↑ / ↓</th><th></th></tr></thead>
+        <tbody id="devices"></tbody>
+      </table></div>
+      <div class="row" style="margin-top:12px">
+        <input id="newName" placeholder="Nombre" style="width:140px">
+        <input id="newMac" placeholder="aa:bb:cc:dd:ee:ff" class="mono" style="width:180px">
+        <button id="addDev">Agregar manual</button>
+      </div>
+      <div class="note">iPhone usa una MAC privada distinta por red Wi-Fi. En Ajustes → Wi-Fi → (i) → Dirección privada, déjala en "Fija" para que no cambie en esa red. En una red nueva vuelve a aprobarlo desde "Intentos bloqueados".</div>
+    </section>
+
+    <section class="card s4">
+      <h2>Controles de seguridad</h2>
+      <div class="checks" id="checks"></div>
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+      <div class="checks">
+        <div><label for="ro">Solo lectura</label><input type="checkbox" id="ro"></div>
+        <div><label for="idle">Auto-apagado sin uso</label>
+          <select id="idle">
+            <option value="0">nunca</option><option value="5">5 min</option><option value="15">15 min</option>
+            <option value="30">30 min</option><option value="60">1 h</option><option value="180">3 h</option>
+          </select></div>
+      </div>
+    </section>
+
+    <section class="card s6">
+      <h2>Intentos bloqueados <button id="clearBlocked" style="float:right;font-size:11px;padding:2px 8px">Limpiar</button></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>IP</th><th>MAC</th><th>Intentos</th><th>Último</th><th></th></tr></thead>
+        <tbody id="blocked"></tbody>
+      </table></div>
+      <div class="note">Si intentas conectar un dispositivo nuevo, aparecerá aquí. Apruébalo y reintenta desde el iPhone.</div>
+    </section>
+
+    <section class="card s6">
+      <h2>Sesiones activas</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Dispositivo</th><th>Protocolo</th><th>Cifrado</th><th>Firma</th><th>Archivos</th><th></th></tr></thead>
+        <tbody id="sessions"></tbody>
+      </table></div>
+    </section>
+
+    <section class="card s6">
+      <h2>Actividad de archivos</h2>
+      <div class="feed" id="activity"></div>
+    </section>
+
+    <section class="card s6">
+      <h2>Eventos y autenticación</h2>
+      <div class="feed" id="events"></div>
+    </section>
+
+    <section class="card s12">
+      <h2>Archivos recientes en la carpeta</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Archivo</th><th>Tamaño</th><th>Modificado</th></tr></thead>
+        <tbody id="recent"></tbody>
+      </table></div>
+    </section>
+  </div>
+</main>
+
+<div id="login" class="card" hidden>
+  <h2>Acceso al panel</h2>
+  <p class="sub">Abre el panel con el comando <code class="mono">compartir panel</code> en la terminal; incluye el token de acceso.</p>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+let token = null;
+try { token = sessionStorage.getItem("fs-token"); } catch (e) {}
+const m = location.hash.match(/t=([\w-]+)/);
+if (m) {
+  token = m[1];
+  try { sessionStorage.setItem("fs-token", token); } catch (e) {}
+  history.replaceState(null, "", location.pathname);
+}
+
+async function call(path, body) {
+  const r = await fetch("/api/" + path, {
+    method: body ? "POST" : "GET",
+    headers: { "X-Token": token || "", "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (r.status === 401) { showLogin(); throw new Error("auth"); }
+  return r.json();
+}
+
+function showLogin() { $("app").hidden = true; $("login").hidden = false; }
+
+function bytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 && i ? 1 : 0) + " " + u[i];
+}
+function ago(t) {
+  if (!t) return "—";
+  const s = Math.floor(Date.now() / 1000 - t);
+  if (s < 60) return "hace " + s + " s";
+  if (s < 3600) return "hace " + Math.floor(s / 60) + " min";
+  if (s < 86400) return "hace " + Math.floor(s / 3600) + " h";
+  return new Date(t * 1000).toLocaleDateString();
+}
+const hhmm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function dur(s) {
+  if (s == null) return "—";
+  if (s < 60) return s + " s";
+  if (s < 3600) return Math.floor(s / 60) + " min";
+  return Math.floor(s / 3600) + " h " + Math.floor((s % 3600) / 60) + " min";
+}
+
+let S = null;
+function render(s) {
+  S = s;
+  $("app").hidden = false; $("login").hidden = true;
+  const st = $("status");
+  st.className = "pill " + (s.running ? "on" : "off");
+  st.textContent = s.running ? "Encendida" : "Apagada";
+  $("toggle").textContent = s.running ? "Apagar" : "Encender";
+  $("toggle").className = "big " + (s.running ? "" : "primary");
+  $("subtitle").textContent = `${s.share_path} · red: ${s.net.ssid || s.net.ifaces.join(", ") || "sin red"}`;
+  $("uname").textContent = s.user;
+  $("addrs").innerHTML = s.addresses.map((a) => `<code class="mono" title="Copiar">${esc(a)}</code>`).join("");
+
+  const up = s.devices.reduce((a, d) => a + d.traffic.up, 0);
+  const down = s.devices.reduce((a, d) => a + d.traffic.down, 0);
+  const tiles = [
+    ["Sesiones activas", s.sessions.length],
+    ["Autorizados", s.devices.length],
+    ["Bloqueos 24 h", s.blocked_24h],
+    ["Logins fallidos 24 h", s.auth_fail_24h],
+    ["Encendida hace", s.running ? dur(Math.floor(Date.now() / 1000) - s.started_at) : "—"],
+    ["Auto-apagado en", s.idle_left == null ? "—" : dur(s.idle_left)],
+    ["Carpeta", bytes(s.folder.size) + " · " + s.folder.files + " arch."],
+    ["Subido / Descargado", bytes(up) + " / " + bytes(down)],
+  ];
+  $("tiles").innerHTML = tiles.map(([l, v]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+
+  $("devices").innerHTML = s.devices.length ? s.devices.map((d) => {
+    const cls = d.connected ? "on" : d.reachable ? "warn" : "off";
+    const txt = d.connected ? "conectado" : d.reachable ? "en la red" : "fuera";
+    return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.mac)}</td>
+      <td><span class="pill ${cls}">${txt}</span></td><td class="mono">${esc(d.ip || "—")}</td>
+      <td>${ago(d.last_seen)}</td><td>${bytes(d.traffic.up)} / ${bytes(d.traffic.down)}</td>
+      <td><button class="danger" data-rm="${esc(d.mac)}">Revocar</button></td></tr>`;
+  }).join("") : `<tr><td colspan="7" class="empty">Ningún dispositivo autorizado todavía.</td></tr>`;
+
+  $("blocked").innerHTML = s.blocked.length ? s.blocked.map((b) => `<tr>
+      <td class="mono">${esc(b.ip)}</td><td class="mono">${esc(b.mac)}</td><td>${b.count}</td><td>${ago(b.last)}</td>
+      <td class="row"><input placeholder="Nombre" style="width:110px" data-name="${esc(b.mac)}"><button class="primary" data-ok="${esc(b.mac)}">Aprobar</button></td></tr>`).join("")
+    : `<tr><td colspan="5" class="empty">Nada bloqueado.</td></tr>`;
+
+  $("sessions").innerHTML = s.sessions.length ? s.sessions.map((x) => `<tr>
+      <td>${esc(x.device || "desconocido")}<div class="sub mono">${esc(x.ip)}</div></td><td>${esc(x.dialect)}</td>
+      <td><span class="pill ${x.encryption === "-" ? "warn" : "on"}">${esc(x.encryption)}</span></td>
+      <td>${esc(x.signing)}</td><td>${x.open_files}</td>
+      <td><button class="danger" data-kill="${esc(x.pid)}">Expulsar</button></td></tr>`).join("")
+    : `<tr><td colspan="6" class="empty">${s.running ? "Esperando conexiones…" : "La carpeta está apagada."}</td></tr>`;
+
+  $("activity").innerHTML = s.activity.length ? s.activity.map((a) =>
+    `<div><time>${hhmm(a.t)}</time><span><b>${esc(a.machine || a.ip)}</b> ${esc(a.op)} <span class="mono">${esc(a.path)}</span></span></div>`).join("")
+    : `<div class="empty">Sin actividad.</div>`;
+
+  const feed = [
+    ...s.events.map((e) => ({ t: e.t, cls: ["blocked", "auth", "panic"].includes(e.kind) ? "bad" : "", msg: e.msg })),
+    ...s.auth.filter((a) => a.ok).map((a) => ({ t: a.t, cls: "", msg: `Login correcto '${a.user}' desde ${a.ip}` })),
+  ].sort((a, b) => b.t - a.t).slice(0, 60);
+  $("events").innerHTML = feed.length ? feed.map((e) =>
+    `<div><time>${hhmm(e.t)}</time><span class="${e.cls ? "" : ""}" style="${e.cls ? "color:var(--bad)" : ""}">${esc(e.msg)}</span></div>`).join("")
+    : `<div class="empty">Sin eventos.</div>`;
+
+  const c = s.checks;
+  const checks = [
+    ["Firewall: solo MAC autorizadas", c.firewall],
+    ["Usuario SMB con contraseña", c.samba_user],
+    ["Invitados deshabilitados", c.guest_disabled],
+    ["SMB3 mínimo, NTLMv2", c.smb3],
+    ["hosts allow = subred local", true],
+    ["Panel solo en localhost + token", c.panel_local_only],
+    ["Auto-apagado activo", s.settings.idle_minutes > 0],
+  ];
+  $("checks").innerHTML = checks.map(([l, v]) =>
+    `<div><span>${esc(l)}</span><span class="pill ${v ? "on" : "bad"}">${v ? "OK" : "revisar"}</span></div>`).join("");
+  if (document.activeElement !== $("idle")) $("idle").value = String(s.settings.idle_minutes);
+  $("ro").checked = s.settings.read_only;
+
+  $("recent").innerHTML = s.folder.recent.length ? s.folder.recent.map((f) =>
+    `<tr><td class="mono">${esc(f.name)}</td><td>${bytes(f.size)}</td><td>${ago(f.t)}</td></tr>`).join("")
+    : `<tr><td colspan="3" class="empty">La carpeta está vacía.</td></tr>`;
+}
+
+async function refresh() {
+  if (!token) return showLogin();
+  try { render(await call("state")); } catch (e) {}
+}
+const act = async (p, b) => { await call(p, b); refresh(); };
+
+$("toggle").onclick = () => act("share", { on: !S.running });
+$("panic").onclick = () => act("panic", {});
+$("clearBlocked").onclick = () => act("blocked/clear", {});
+$("ro").onchange = (e) => act("settings", { read_only: e.target.checked });
+$("idle").onchange = (e) => act("settings", { idle_minutes: Number(e.target.value) });
+$("addDev").onclick = () => act("devices/add", { mac: $("newMac").value, name: $("newName").value })
+  .then(() => { $("newMac").value = ""; $("newName").value = ""; });
+$("addrs").onclick = (e) => { if (e.target.tagName === "CODE") navigator.clipboard?.writeText(e.target.textContent); };
+document.body.addEventListener("click", (e) => {
+  const t = e.target;
+  if (t.dataset.rm) act("devices/remove", { mac: t.dataset.rm });
+  if (t.dataset.kill) act("sessions/kill", { pid: t.dataset.kill });
+  if (t.dataset.ok) {
+    const inp = document.querySelector(`input[data-name="${t.dataset.ok}"]`);
+    act("devices/add", { mac: t.dataset.ok, name: inp?.value || "iPhone" });
+  }
+});
+
+refresh();
+setInterval(() => {
+  // no re-renderizar mientras se escribe un nombre
+  const a = document.activeElement;
+  if (a && a.tagName === "INPUT" && a.type !== "checkbox") return;
+  refresh();
+}, 2000);
+</script>
+</body>
+</html>
