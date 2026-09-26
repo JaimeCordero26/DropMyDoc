@@ -61,6 +61,13 @@ tr:last-child td { border-bottom: 0; }
 .scroll { overflow-x: auto; }
 .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
 #login { max-width: 460px; margin: 15vh auto; }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--chip); border-radius: 6px; padding: 2px 8px; font-size: 12px; margin: 2px 4px 2px 0; }
+.chip button { border: 0; background: none; padding: 0 2px; color: var(--muted); }
+.secret { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--ok-bg); border: 1px solid var(--ok); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.secret code { font-size: 16px; font-weight: 650; letter-spacing: .04em; }
+.err { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
+.stats { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+select.mini { padding: 3px 6px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -79,16 +86,34 @@ tr:last-child td { border-bottom: 0; }
   <div class="grid">
     <section class="card s12">
       <h2>Conectar desde iPhone</h2>
-      <div class="sub" style="margin-bottom:10px">Archivos → ··· → Conectarse al servidor → pega una dirección → Usuario registrado: <b id="uname"></b> + contraseña SMB.</div>
+      <div class="sub" style="margin-bottom:10px">Archivos → ··· → Conectarse al servidor → pega una dirección → Usuario registrado → el usuario y contraseña que creaste para ese dispositivo. En Windows: Explorador → <span class="mono">\\<span id="hostname"></span>.local\<span id="sharename"></span></span>.</div>
       <div class="addr" id="addrs"></div>
     </section>
 
     <section class="s12 tiles" id="tiles"></section>
 
+    <section class="card s12">
+      <h2>Usuarios</h2>
+      <div id="secret" class="secret" hidden></div>
+      <div class="scroll"><table>
+        <thead><tr><th>Usuario</th><th>Permiso</th><th>Dispositivos permitidos</th><th>Estado</th><th>Actividad</th><th>Tráfico ↑ / ↓</th><th></th></tr></thead>
+        <tbody id="users"></tbody>
+      </table></div>
+      <div class="row" style="margin-top:12px">
+        <input id="uName" placeholder="login (ej. iphone)" class="mono" style="width:150px" autocomplete="off">
+        <input id="uLabel" placeholder="Descripción (ej. Mi iPhone)" style="width:190px">
+        <select id="uPerm"><option value="rw">Lectura y escritura</option><option value="ro">Solo lectura</option></select>
+        <input id="uPass" type="password" placeholder="Contraseña (vacío = generar)" style="width:210px" autocomplete="new-password">
+        <button class="primary" id="uAdd">Crear usuario</button>
+      </div>
+      <div class="err" id="uErr"></div>
+      <div class="note">Crea un usuario por dispositivo o persona. Si vinculas dispositivos, ese usuario solo podrá entrar desde ellos; sin vínculo, entra desde cualquier dispositivo autorizado. Los cambios de permisos cierran sus sesiones para aplicarse de inmediato.</div>
+    </section>
+
     <section class="card s8">
       <h2>Dispositivos autorizados</h2>
       <div class="scroll"><table>
-        <thead><tr><th>Nombre</th><th>MAC</th><th>Estado</th><th>IP</th><th>Último uso</th><th>↑ / ↓</th><th></th></tr></thead>
+        <thead><tr><th>Nombre</th><th>MAC</th><th>Estado</th><th>IP</th><th>Usuarios</th><th>Último uso</th><th>↑ / ↓</th><th></th></tr></thead>
         <tbody id="devices"></tbody>
       </table></div>
       <div class="row" style="margin-top:12px">
@@ -125,7 +150,7 @@ tr:last-child td { border-bottom: 0; }
     <section class="card s6">
       <h2>Sesiones activas</h2>
       <div class="scroll"><table>
-        <thead><tr><th>Dispositivo</th><th>Protocolo</th><th>Cifrado</th><th>Firma</th><th>Archivos</th><th></th></tr></thead>
+        <thead><tr><th>Usuario</th><th>Protocolo</th><th>Cifrado</th><th>Firma</th><th>Archivos</th><th></th></tr></thead>
         <tbody id="sessions"></tbody>
       </table></div>
     </section>
@@ -175,7 +200,9 @@ async function call(path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (r.status === 401) { showLogin(); throw new Error("auth"); }
-  return r.json();
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || "error");
+  return data;
 }
 
 function showLogin() { $("app").hidden = true; $("login").hidden = false; }
@@ -212,14 +239,16 @@ function render(s) {
   $("toggle").textContent = s.running ? "Apagar" : "Encender";
   $("toggle").className = "big " + (s.running ? "" : "primary");
   $("subtitle").textContent = `${s.share_path} · red: ${s.net.ssid || s.net.ifaces.join(", ") || "sin red"}`;
-  $("uname").textContent = s.user;
+  $("hostname").textContent = s.host;
+  $("sharename").textContent = s.share;
   $("addrs").innerHTML = s.addresses.map((a) => `<code class="mono" title="Copiar">${esc(a)}</code>`).join("");
 
   const up = s.devices.reduce((a, d) => a + d.traffic.up, 0);
   const down = s.devices.reduce((a, d) => a + d.traffic.down, 0);
   const tiles = [
     ["Sesiones activas", s.sessions.length],
-    ["Autorizados", s.devices.length],
+    ["Usuarios", s.users.filter((u) => u.enabled).length + " / " + s.users.length],
+    ["Dispositivos", s.devices.length],
     ["Bloqueos 24 h", s.blocked_24h],
     ["Logins fallidos 24 h", s.auth_fail_24h],
     ["Encendida hace", s.running ? dur(Math.floor(Date.now() / 1000) - s.started_at) : "—"],
@@ -234,9 +263,10 @@ function render(s) {
     const txt = d.connected ? "conectado" : d.reachable ? "en la red" : "fuera";
     return `<tr><td>${esc(d.name)}</td><td class="mono">${esc(d.mac)}</td>
       <td><span class="pill ${cls}">${txt}</span></td><td class="mono">${esc(d.ip || "—")}</td>
+      <td>${d.users.length ? d.users.map((u) => `<span class="chip">${esc(u)}</span>`).join("") : '<span class="sub">todos</span>'}</td>
       <td>${ago(d.last_seen)}</td><td>${bytes(d.traffic.up)} / ${bytes(d.traffic.down)}</td>
       <td><button class="danger" data-rm="${esc(d.mac)}">Revocar</button></td></tr>`;
-  }).join("") : `<tr><td colspan="7" class="empty">Ningún dispositivo autorizado todavía.</td></tr>`;
+  }).join("") : `<tr><td colspan="8" class="empty">Ningún dispositivo autorizado todavía.</td></tr>`;
 
   $("blocked").innerHTML = s.blocked.length ? s.blocked.map((b) => `<tr>
       <td class="mono">${esc(b.ip)}</td><td class="mono">${esc(b.mac)}</td><td>${b.count}</td><td>${ago(b.last)}</td>
@@ -244,7 +274,7 @@ function render(s) {
     : `<tr><td colspan="5" class="empty">Nada bloqueado.</td></tr>`;
 
   $("sessions").innerHTML = s.sessions.length ? s.sessions.map((x) => `<tr>
-      <td>${esc(x.device || "desconocido")}<div class="sub mono">${esc(x.ip)}</div></td><td>${esc(x.dialect)}</td>
+      <td><b>${esc(x.user)}</b><div class="sub">${esc(x.device || "desconocido")} · <span class="mono">${esc(x.ip)}</span></div></td><td>${esc(x.dialect)}</td>
       <td><span class="pill ${x.encryption === "-" ? "warn" : "on"}">${esc(x.encryption)}</span></td>
       <td>${esc(x.signing)}</td><td>${x.open_files}</td>
       <td><button class="danger" data-kill="${esc(x.pid)}">Expulsar</button></td></tr>`).join("")
@@ -262,10 +292,12 @@ function render(s) {
     `<div><time>${hhmm(e.t)}</time><span class="${e.cls ? "" : ""}" style="${e.cls ? "color:var(--bad)" : ""}">${esc(e.msg)}</span></div>`).join("")
     : `<div class="empty">Sin eventos.</div>`;
 
+  renderUsers(s);
+
   const c = s.checks;
   const checks = [
     ["Firewall: solo MAC autorizadas", c.firewall],
-    ["Usuario SMB con contraseña", c.samba_user],
+    ["Hay usuarios SMB activos", c.samba_user],
     ["Invitados deshabilitados", c.guest_disabled],
     ["SMB3 mínimo, NTLMv2", c.smb3],
     ["hosts allow = subred local", true],
@@ -282,11 +314,64 @@ function render(s) {
     : `<tr><td colspan="3" class="empty">La carpeta está vacía.</td></tr>`;
 }
 
+let confirmDel = null;
+function renderUsers(s) {
+  $("users").innerHTML = s.users.length ? s.users.map((u) => {
+    const st = u.stats;
+    const state = !u.enabled ? ["bad", "deshabilitado"] : u.online ? ["on", "conectado"] : ["off", "desconectado"];
+    const linked = u.devices.map((m, i) =>
+      `<span class="chip">${esc(u.device_names[i])}<button title="Desvincular" data-unlink="${esc(u.name)}" data-mac="${esc(m)}">×</button></span>`).join("");
+    const free = s.devices.filter((d) => !u.devices.includes(d.mac));
+    const picker = free.length ? `<select class="mini" data-link="${esc(u.name)}"><option value="">+ vincular…</option>${
+      free.map((d) => `<option value="${esc(d.mac)}">${esc(d.name)}</option>`).join("")}</select>` : "";
+    return `<tr>
+      <td><b class="mono">${esc(u.name)}</b><div class="sub">${esc(u.label)}</div>${u.has_password ? "" : '<span class="pill bad">sin contraseña SMB</span>'}</td>
+      <td><select class="mini" data-perm="${esc(u.name)}">
+        <option value="rw" ${u.perm === "rw" ? "selected" : ""}>Lectura y escritura</option>
+        <option value="ro" ${u.perm === "ro" ? "selected" : ""}>Solo lectura</option></select></td>
+      <td>${linked || '<span class="sub">cualquier autorizado</span>'} ${picker}</td>
+      <td><span class="pill ${state[0]}">${state[1]}</span><div class="stats">último login ${ago(st.last_login)}</div></td>
+      <td class="stats">${st.logins} logins · ${st.fails} fallidos<br>${st.written} escritos · ${st.read} leídos · ${st.deleted} borrados</td>
+      <td>${bytes(st.up)} / ${bytes(st.down)}</td>
+      <td class="row" style="flex-wrap:nowrap">
+        <button data-toggle="${esc(u.name)}" data-on="${u.enabled ? 0 : 1}">${u.enabled ? "Deshabilitar" : "Habilitar"}</button>
+        <button data-pass="${esc(u.name)}">Nueva contraseña</button>
+        <button class="danger" data-del="${esc(u.name)}">${confirmDel === u.name ? "¿Seguro?" : "Eliminar"}</button>
+      </td></tr>`;
+  }).join("") : `<tr><td colspan="7" class="empty">Sin usuarios. Crea uno por dispositivo (iphone, windows, t14…).</td></tr>`;
+}
+
+function showSecret(name, password) {
+  const el = $("secret");
+  el.hidden = false;
+  el.innerHTML = `<span>Contraseña de <b class="mono">${esc(name)}</b> (se muestra solo esta vez):</span>
+    <code class="mono">${esc(password)}</code><button id="copySecret">Copiar</button><button id="hideSecret">Ocultar</button>`;
+  $("copySecret").onclick = () => navigator.clipboard?.writeText(password);
+  $("hideSecret").onclick = () => { el.hidden = true; el.innerHTML = ""; };
+}
+
 async function refresh() {
   if (!token) return showLogin();
   try { render(await call("state")); } catch (e) {}
 }
-const act = async (p, b) => { await call(p, b); refresh(); };
+const act = async (p, b) => {
+  try { const r = await call(p, b); refresh(); return r; }
+  catch (e) { $("uErr").textContent = e.message; setTimeout(() => ($("uErr").textContent = ""), 6000); }
+};
+const userOf = (name) => S.users.find((u) => u.name === name);
+
+$("uAdd").onclick = async () => {
+  const r = await act("users/add", { name: $("uName").value, label: $("uLabel").value, perm: $("uPerm").value, password: $("uPass").value });
+  if (r?.password) {
+    showSecret(r.name, r.password);
+    ["uName", "uLabel", "uPass"].forEach((id) => ($(id).value = ""));
+  }
+};
+document.body.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.dataset.perm) act("users/update", { name: t.dataset.perm, perm: t.value });
+  if (t.dataset.link && t.value) act("users/update", { name: t.dataset.link, devices: [...userOf(t.dataset.link).devices, t.value] });
+});
 
 $("toggle").onclick = () => act("share", { on: !S.running });
 $("panic").onclick = () => act("panic", {});
@@ -299,6 +384,13 @@ $("addrs").onclick = (e) => { if (e.target.tagName === "CODE") navigator.clipboa
 document.body.addEventListener("click", (e) => {
   const t = e.target;
   if (t.dataset.rm) act("devices/remove", { mac: t.dataset.rm });
+  if (t.dataset.unlink) act("users/update", { name: t.dataset.unlink, devices: userOf(t.dataset.unlink).devices.filter((m) => m !== t.dataset.mac) });
+  if (t.dataset.toggle) act("users/update", { name: t.dataset.toggle, enabled: t.dataset.on === "1" });
+  if (t.dataset.pass) act("users/password", { name: t.dataset.pass }).then((r) => r && showSecret(r.name, r.password));
+  if (t.dataset.del) {
+    if (confirmDel === t.dataset.del) { confirmDel = null; act("users/remove", { name: t.dataset.del }); }
+    else { confirmDel = t.dataset.del; renderUsers(S); setTimeout(() => { confirmDel = null; S && renderUsers(S); }, 4000); }
+  }
   if (t.dataset.kill) act("sessions/kill", { pid: t.dataset.kill });
   if (t.dataset.ok) {
     const inp = document.querySelector(`input[data-name="${t.dataset.ok}"]`);
@@ -310,7 +402,7 @@ refresh();
 setInterval(() => {
   // no re-renderizar mientras se escribe un nombre
   const a = document.activeElement;
-  if (a && a.tagName === "INPUT" && a.type !== "checkbox") return;
+  if (a && (a.tagName === "SELECT" || (a.tagName === "INPUT" && a.type !== "checkbox"))) return;
   refresh();
 }, 2000);
 </script>

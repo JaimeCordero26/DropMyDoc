@@ -58,7 +58,7 @@ GROUP=$(id -gn "$USER_NAME")
 HOSTNAME_=$(hostname)
 UNIT=$(smbd_unit)
 
-for bin in python3 iptables ip curl jq journalctl; do
+for bin in python3 iptables ip curl jq journalctl useradd smbpasswd; do
   command -v "$bin" >/dev/null || die "falta '$bin' (Arch: pacman -S --needed python iptables-nft iproute2 curl jq)"
 done
 
@@ -70,6 +70,7 @@ install -m 0755 "$REPO/bin/compartir" /usr/local/bin/compartir
 echo "→ carpeta $SHARE_PATH"
 install -d -o "$USER_NAME" -g "$GROUP" -m 0755 "$SHARE_PATH"
 install -d -m 0755 "$STATE_DIR"
+getent group fileshare >/dev/null || groupadd --system fileshare
 
 echo "→ $SMB_CONF"
 install -d /etc/samba
@@ -102,7 +103,11 @@ $MARK
 
 [$SHARE]
   path = $SHARE_PATH
-  valid users = $USER_NAME
+  valid users = @fileshare
+  force user = $USER_NAME
+  force group = $GROUP
+  root preexec = $(command -v python3) $PREFIX/panel.py --check %U %I
+  root preexec close = yes
   guest ok = no
   browseable = yes
   create mask = 0644
@@ -114,7 +119,7 @@ $MARK
   fruit:veto_appledouble = no
   fruit:wipe_intentionally_left_blank_rfork = yes
   fruit:delete_empty_adfiles = yes
-  full_audit:prefix = %u|%I|%m
+  full_audit:prefix = %U|%I|%m
   full_audit:success = connect disconnect openat renameat unlinkat mkdirat
   full_audit:failure = connect
   full_audit:facility = local5
@@ -155,8 +160,8 @@ systemctl enable --now fileshare-panel
 cat <<EOF
 
 Listo. Pasos siguientes:
-  1. Contraseña SMB (distinta de la de tu sesión):  sudo smbpasswd -a $USER_NAME
-  2. compartir on && compartir panel
+  1. compartir panel  → crea un usuario por dispositivo (iphone, windows, ...)
+  2. compartir on
 
 Si usas firewalld o ufw, esos firewalls también deben permitir el puerto 445/tcp;
 el filtrado por MAC lo sigue haciendo compartir.

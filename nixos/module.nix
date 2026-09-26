@@ -25,7 +25,7 @@ in {
     enable = lib.mkEnableOption "carpeta compartida SMB bajo demanda";
     user = lib.mkOption {
       type = lib.types.str;
-      description = "Usuario dueño de la carpeta y único usuario SMB permitido.";
+      description = "Usuario dueño de la carpeta. Los usuarios SMB (uno por dispositivo) se crean desde el panel y escriben como este usuario.";
     };
     shareName = lib.mkOption {
       type = lib.types.str;
@@ -70,7 +70,13 @@ in {
         };
         ${cfg.shareName} = {
           "path" = sharePath;
-          "valid users" = cfg.user;
+          # usuarios SMB creados desde el panel; los archivos quedan a nombre del dueño
+          "valid users" = "@fileshare";
+          "force user" = cfg.user;
+          "force group" = config.users.users.${cfg.user}.group;
+          # rechaza usuarios deshabilitados o que entran desde un dispositivo no vinculado
+          "root preexec" = "${pkgs.python3}/bin/python3 ${../panel/panel.py} --check %U %I";
+          "root preexec close" = "yes";
           "guest ok" = "no";
           "browseable" = "yes";
           "create mask" = "0644";
@@ -82,7 +88,7 @@ in {
           "fruit:veto_appledouble" = "no";
           "fruit:wipe_intentionally_left_blank_rfork" = "yes";
           "fruit:delete_empty_adfiles" = "yes";
-          "full_audit:prefix" = "%u|%I|%m";
+          "full_audit:prefix" = "%U|%I|%m";
           "full_audit:success" = "connect disconnect openat renameat unlinkat mkdirat";
           "full_audit:failure" = "connect";
           "full_audit:facility" = "local5";
@@ -101,6 +107,8 @@ in {
       wants = ["fileshare-panel.service"];
     };
 
+    users.groups.fileshare = {};
+
     systemd.tmpfiles.rules = [
       "d ${sharePath} 0755 ${cfg.user} users -"
     ];
@@ -116,6 +124,7 @@ in {
         pkgs.iproute2
         pkgs.networkmanager
         pkgs.coreutils
+        pkgs.shadow
       ];
       environment = {
         FILESHARE_USER = cfg.user;

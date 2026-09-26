@@ -1,10 +1,15 @@
 """Panel local y control de acceso para la carpeta compartida SMB.
 
-Corre como root (necesita iptables, systemctl y smbcontrol). Escucha solo en
-127.0.0.1 y exige un token (header X-Token) para toda la API; el token se
-escribe en /run/fileshare/token, legible solo por el usuario dueño.
+Corre como root (necesita iptables, systemctl, smbcontrol y useradd). Escucha
+solo en 127.0.0.1 y exige un token (header X-Token) para toda la API; el token
+se escribe en /run/fileshare/token, legible solo por el usuario dueño.
+
+Con `--check USUARIO IP` actúa como `root preexec` de Samba: permite o rechaza
+la conexión según el usuario esté habilitado y, si tiene dispositivos
+vinculados, según la MAC de la IP que se conecta.
 """
 
+import grp
 import ipaddress
 import json
 import os
@@ -12,6 +17,8 @@ import pwd
 import re
 import secrets
 import subprocess
+import sys
+import syslog
 import threading
 import time
 from collections import deque
@@ -34,6 +41,11 @@ SMB_GLOBAL_CONF = os.path.join(STATE_DIR, "smb-global.conf")
 SMB_SHARE_CONF = os.path.join(STATE_DIR, "smb-share.conf")
 TOKEN_FILE = os.path.join(RUN_DIR, "token")
 
+SMB_GROUP = "fileshare"
+USER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
+PASS_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+CHECK_TAG = "compartir-check"
+
 CHAIN = "fileshare"
 ACCT_IN = "fileshare-acct-in"
 ACCT_OUT = "fileshare-acct-out"
@@ -48,9 +60,9 @@ def now():
     return int(time.time())
 
 
-def run(*cmd, check=False):
+def run(*cmd, check=False, input=None):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=15, input=input)
     except (OSError, subprocess.TimeoutExpired):
         return None if check else ""
     if check and p.returncode != 0:
@@ -58,8 +70,8 @@ def run(*cmd, check=False):
     return p.stdout
 
 
-def ok(*cmd):
-    return run(*cmd, check=True) is not None
+def ok(*cmd, input=None):
+    return run(*cmd, check=True, input=input) is not None
 
 
 # ---------------------------------------------------------------- estado
@@ -68,6 +80,7 @@ def ok(*cmd):
 def default_state():
     return {
         "devices": [],
+        "users": [],
         "settings": {"idle_minutes": 30, "read_only": False},
         "events": [],
         "traffic": {},
@@ -119,6 +132,18 @@ def event(kind, msg):
 
 def device(mac):
     return next((d for d in state["devices"] if d["mac"] == mac), None)
+
+
+def smb_user(name):
+    name = (name or "").lower()
+    return next((u for u in state["users"] if u["name"] == name), None)
+
+
+def user_stats(u):
+    return u.setdefault("stats", {
+        "logins": 0, "fails": 0, "written": 0, "read": 0, "deleted": 0,
+        "up": 0, "down": 0, "last_login": None, "last_ip": None,
+    })
 
 
 # ---------------------------------------------------------------- red
@@ -222,6 +247,7 @@ def harvest_traffic():
     """Suma los contadores de iptables a los totales persistentes por MAC."""
     with lock:
         ip_to_mac = {ip: m for m, ip in runtime["neigh"].items()}
+        mac_to_user = {s["mac"]: s["user"] for s in runtime["sessions"] if s["mac"]}
         prev = runtime["acct_prev"]
         for chain, direction in ((ACCT_IN, "up"), (ACCT_OUT, "down")):
             out = run("iptables", "-L", chain, "-v", "-x", "-n") or ""
@@ -244,6 +270,9 @@ def harvest_traffic():
                 prev[k] = nbytes
                 t = state["traffic"].setdefault(mac, {"up": 0, "down": 0})
                 t[direction] += delta
+                u = smb_user(mac_to_user.get(mac))
+                if u and delta:
+                    user_stats(u)[direction] += delta
 
 
 # ---------------------------------------------------------------- samba
@@ -253,8 +282,14 @@ def write_samba_conf():
     with lock:
         subnets = runtime["net"]["subnets"]
         ro = state["settings"]["read_only"]
+        disabled = [u["name"] for u in state["users"] if not u.get("enabled", True)]
+        readers = [u["name"] for u in state["users"] if u.get("perm") == "ro"]
     g = f"hosts allow = 127.0.0.1 {' '.join(subnets)}\nhosts deny = ALL\n"
     s = f"read only = {'yes' if ro else 'no'}\n"
+    if disabled:
+        s += f"invalid users = {' '.join(disabled)}\n"
+    if readers:
+        s += f"read list = {' '.join(readers)}\n"
     changed = False
     for path, content in ((SMB_GLOBAL_CONF, g), (SMB_SHARE_CONF, s)):
         try:
@@ -345,8 +380,13 @@ def kill_session(pid):
         os.kill(int(s["pid"]), 15)
     except OSError:
         return False
-    event("session", f"Sesión expulsada: {s['device'] or s['ip']}")
+    event("session", f"Sesión expulsada: {s['user']} desde {s['device'] or s['ip']}")
     return True
+
+
+def kill_user_sessions(name):
+    for pid in [s["pid"] for s in runtime["sessions"] if s["user"].lower() == name]:
+        kill_session(pid)
 
 
 def refresh_folder():
@@ -454,6 +494,11 @@ def on_audit(entry):
             return
         act.append({"t": now(), "user": user, "ip": ip, "machine": machine, "op": op, "path": path})
         runtime["last_activity"] = now()
+        u = smb_user(user)
+        if u:
+            key = {"escribió": "written", "abrió": "read", "borró": "deleted"}.get(op)
+            if key:
+                user_stats(u)[key] += 1
 
 
 AUTH_RE = re.compile(r"user \[[^\]]*\]\\\[([^\]]*)\].*status \[(\w+)\].*remote host \[ipv4:([\d.]+):")
@@ -466,8 +511,111 @@ def on_smbd(entry):
     user, status, ip = m.groups()
     with lock:
         runtime["auth"].append({"t": now(), "user": user, "ip": ip, "ok": status == "NT_STATUS_OK", "status": status})
+        u = smb_user(user)
+        if u:
+            st = user_stats(u)
+            if status == "NT_STATUS_OK":
+                st["logins"] += 1
+                st["last_login"] = now()
+                st["last_ip"] = ip
+            else:
+                st["fails"] += 1
     if status != "NT_STATUS_OK":
         event("auth", f"Login fallido ({status}) usuario '{user}' desde {ip}")
+
+
+def on_check(entry):
+    # DENY|usuario|ip|mac|motivo  (lo escribe `panel.py --check`)
+    parts = msg_of(entry).split("|")
+    if len(parts) < 5 or parts[0] != "DENY":
+        return
+    _, user, ip, mac, reason = parts[:5]
+    event("auth", f"Conexión rechazada a '{user}' desde {ip} {mac}: {reason}")
+
+
+# ---------------------------------------------------------------- usuarios
+
+
+def nologin_shell():
+    for p in ("/run/current-system/sw/bin/nologin", "/usr/sbin/nologin", "/usr/bin/nologin", "/sbin/nologin"):
+        if os.path.exists(p):
+            return p
+    return "/bin/false"
+
+
+def gen_password():
+    raw = "".join(secrets.choice(PASS_ALPHABET) for _ in range(12))
+    return f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+
+
+def set_smb_password(name, password):
+    return ok("smbpasswd", "-s", "-a", name, input=f"{password}\n{password}\n")
+
+
+def create_user(name, label, perm, password):
+    try:
+        grp.getgrnam(SMB_GROUP)
+    except KeyError:
+        run("groupadd", "--system", SMB_GROUP)
+    created = False
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        created = True
+        if not ok("useradd", "--system", "--no-create-home", "--home-dir", "/var/empty",
+                  "--shell", nologin_shell(), "--gid", SMB_GROUP,
+                  "--comment", f"compartir: {label}", name):
+            return "no se pudo crear el usuario del sistema"
+    if not set_smb_password(name, password):
+        if created:
+            run("userdel", name)
+        return "no se pudo fijar la contraseña SMB"
+    with lock:
+        state["users"].append({
+            "name": name, "label": label, "perm": perm, "enabled": True,
+            "devices": [], "created": now(),
+        })
+        user_stats(state["users"][-1])
+        save_state()
+    write_samba_conf()
+    return None
+
+
+def delete_user(name):
+    kill_user_sessions(name)
+    run("smbpasswd", "-x", name)
+    run("userdel", name)
+    with lock:
+        u = smb_user(name)
+        if u:
+            state["users"].remove(u)
+            save_state()
+    write_samba_conf()
+
+
+def check_main(user, ip):
+    """root preexec de Samba: exit 0 permite, exit 1 corta la conexión."""
+    syslog.openlog(CHECK_TAG, 0, syslog.LOG_AUTH)
+    user = user.lower()
+    u = smb_user(user)
+    mac = ""
+    try:
+        with open("/proc/net/arp") as f:
+            for line in f.readlines()[1:]:
+                cols = line.split()
+                if len(cols) >= 4 and cols[0] == ip:
+                    mac = cols[3].lower()
+    except OSError:
+        pass
+    reason = None
+    if not u:
+        reason = "usuario no gestionado por compartir"
+    elif not u.get("enabled", True):
+        reason = "usuario deshabilitado"
+    elif u.get("devices") and ip != "127.0.0.1" and mac not in u["devices"]:
+        reason = "dispositivo no vinculado a este usuario"
+    syslog.syslog(syslog.LOG_NOTICE, f"{'DENY' if reason else 'ALLOW'}|{user}|{ip}|{mac}|{reason or ''}")
+    sys.exit(1 if reason else 0)
 
 
 # ---------------------------------------------------------------- bucle
@@ -505,8 +653,8 @@ def loop():
 # ---------------------------------------------------------------- API
 
 
-def samba_user_ok():
-    return USER in (run("pdbedit", "-L") or "")
+def samba_users():
+    return {line.split(":", 1)[0] for line in (run("pdbedit", "-L") or "").splitlines() if ":" in line}
 
 
 def snapshot():
@@ -520,6 +668,19 @@ def snapshot():
             devs.append({**d, "ip": ip, "reachable": ip is not None,
                          "connected": ip in online_ips,
                          "traffic": state["traffic"].get(d["mac"], {"up": 0, "down": 0})})
+        online_users = {s["user"].lower() for s in runtime["sessions"]}
+        dev_names = {d["mac"]: d["name"] for d in state["devices"]}
+        users = []
+        for u in state["users"]:
+            users.append({
+                **u,
+                "stats": user_stats(u),
+                "online": u["name"] in online_users,
+                "has_password": u["name"] in _samba_user_cache["names"],
+                "device_names": [dev_names.get(m, m) for m in u.get("devices", [])],
+            })
+        for d in devs:
+            d["users"] = [u["name"] for u in state["users"] if d["mac"] in u.get("devices", [])]
         cut = now() - 86400
         return {
             "running": runtime["running"],
@@ -535,6 +696,7 @@ def snapshot():
             "addresses": [f"smb://{HOST}.local"] + [f"smb://{a}" for a in net["addresses"]],
             "net": net,
             "devices": devs,
+            "users": users,
             "blocked": sorted(runtime["blocked"].values(), key=lambda b: -b.get("last", 0)),
             "sessions": runtime["sessions"],
             "activity": list(runtime["activity"])[-60:][::-1],
@@ -546,7 +708,7 @@ def snapshot():
             "folder": runtime["folder"],
             "checks": {
                 "firewall": runtime["fw_ok"],
-                "samba_user": _samba_user_cache["ok"],
+                "samba_user": any(u.get("enabled", True) for u in state["users"]),
                 "whitelist_only": True,
                 "smb3": True,
                 "guest_disabled": True,
@@ -555,13 +717,13 @@ def snapshot():
         }
 
 
-_samba_user_cache = {"ok": False, "at": 0}
+_samba_user_cache = {"names": set(), "at": 0}
 
 
 def api(method, path, body):
     if method == "GET" and path == "/api/state":
         if time.time() - _samba_user_cache["at"] > 15:
-            _samba_user_cache.update(ok=samba_user_ok(), at=time.time())
+            _samba_user_cache.update(names=samba_users(), at=time.time())
         return 200, snapshot()
 
     if method != "POST":
@@ -593,11 +755,91 @@ def api(method, path, body):
             if not d:
                 return 404, {"error": "no existe"}
             state["devices"].remove(d)
+            for u in state["users"]:
+                if mac in u.get("devices", []):
+                    u["devices"].remove(mac)
             victims = [s["pid"] for s in runtime["sessions"] if s["mac"] == mac]
         sync_firewall()
         for pid in victims:
             kill_session(pid)
         event("device", f"Revocado: {d['name']} ({mac})")
+        return 200, {"ok": True}
+
+    if path == "/api/users/add":
+        name = str(body.get("name", "")).strip().lower()
+        label = str(body.get("label", "")).strip()[:40] or name
+        perm = "ro" if body.get("perm") == "ro" else "rw"
+        password = str(body.get("password") or "") or gen_password()
+        if not USER_RE.match(name):
+            return 400, {"error": "Nombre inválido: minúsculas, números, - o _, empezando por letra (2-31)."}
+        if len(password) < 8:
+            return 400, {"error": "La contraseña debe tener al menos 8 caracteres."}
+        if smb_user(name):
+            return 409, {"error": "Ese usuario ya existe."}
+        try:
+            pwd.getpwnam(name)
+            return 409, {"error": f"'{name}' ya es un usuario del sistema; elige otro nombre."}
+        except KeyError:
+            pass
+        err = create_user(name, label, perm, password)
+        if err:
+            return 500, {"error": err}
+        _samba_user_cache["at"] = 0
+        event("user", f"Usuario creado: {name} ({label}, {'solo lectura' if perm == 'ro' else 'lectura y escritura'})")
+        return 200, {"ok": True, "name": name, "password": password}
+
+    if path == "/api/users/update":
+        name = str(body.get("name", "")).lower()
+        with lock:
+            u = smb_user(name)
+            if not u:
+                return 404, {"error": "no existe"}
+            changes = []
+            if "label" in body:
+                u["label"] = str(body["label"]).strip()[:40] or name
+            if "perm" in body:
+                u["perm"] = "ro" if body["perm"] == "ro" else "rw"
+                changes.append("solo lectura" if u["perm"] == "ro" else "lectura y escritura")
+            if "enabled" in body:
+                u["enabled"] = bool(body["enabled"])
+                changes.append("habilitado" if u["enabled"] else "deshabilitado")
+            if "devices" in body:
+                macs = [str(m).lower() for m in body["devices"]]
+                if not all(MAC_RE.match(m) for m in macs):
+                    return 400, {"error": "MAC inválida"}
+                u["devices"] = sorted(set(macs))
+                changes.append(f"{len(u['devices'])} dispositivo(s) vinculado(s)" if u["devices"] else "cualquier dispositivo autorizado")
+            save_state()
+        if "enabled" in body:
+            run("smbpasswd", "-e" if u["enabled"] else "-d", name)
+        write_samba_conf()
+        # los permisos se evalúan al conectar: se expulsa para que apliquen ya
+        if {"perm", "enabled", "devices"} & body.keys():
+            kill_user_sessions(name)
+        if changes:
+            event("user", f"Usuario {name}: {', '.join(changes)}")
+        return 200, {"ok": True}
+
+    if path == "/api/users/password":
+        name = str(body.get("name", "")).lower()
+        if not smb_user(name):
+            return 404, {"error": "no existe"}
+        password = str(body.get("password") or "") or gen_password()
+        if len(password) < 8:
+            return 400, {"error": "La contraseña debe tener al menos 8 caracteres."}
+        if not set_smb_password(name, password):
+            return 500, {"error": "no se pudo cambiar la contraseña"}
+        kill_user_sessions(name)
+        event("user", f"Contraseña cambiada: {name}")
+        return 200, {"ok": True, "name": name, "password": password}
+
+    if path == "/api/users/remove":
+        name = str(body.get("name", "")).lower()
+        if not smb_user(name):
+            return 404, {"error": "no existe"}
+        delete_user(name)
+        _samba_user_cache["at"] = 0
+        event("user", f"Usuario eliminado: {name}")
         return 200, {"ok": True}
 
     if path == "/api/sessions/kill":
@@ -718,10 +960,13 @@ def main():
     threading.Thread(target=follow, args=(["-k"], on_kernel), daemon=True).start()
     threading.Thread(target=follow, args=(["-t", "smbd_audit"], on_audit), daemon=True).start()
     threading.Thread(target=follow, args=(["-u", SMBD_UNIT], on_smbd), daemon=True).start()
+    threading.Thread(target=follow, args=(["-t", CHECK_TAG], on_check), daemon=True).start()
     threading.Thread(target=loop, daemon=True).start()
     print(f"panel en http://127.0.0.1:{PORT}")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--check":
+        check_main(sys.argv[2], sys.argv[3])
     main()

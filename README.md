@@ -6,12 +6,14 @@ Una carpeta de tu laptop compartida por SMB para abrirla desde la app **Archivos
 
 1. **Firewall por MAC.** El puerto 445 solo acepta conexiones nuevas de las MAC que están en la whitelist. Todo lo demás se descarta y se registra como "intento bloqueado".
 2. **Samba `hosts allow`.** Solo acepta la subred local actual; el panel la regenera cuando cambias de red.
-3. **Usuario y contraseña SMB.** Un único usuario válido, invitados deshabilitados, SMB3 como mínimo y solo NTLMv2.
-4. **Encendido bajo demanda.** `smbd` no arranca con el sistema. El panel lo apaga solo tras N minutos sin sesiones (30 por defecto).
-5. **Panel solo en `127.0.0.1`.** Pide un token que solo puede leer tu usuario (`/run/fileshare/token`) y comprueba el header `Host` para impedir DNS rebinding.
+3. **Un usuario SMB por dispositivo o persona** (`iphone`, `windows`, `t14`…), cada uno con su contraseña. Invitados deshabilitados, SMB3 como mínimo y solo NTLMv2.
+4. **Vínculo usuario ↔ dispositivo.** Si a un usuario le vinculas dispositivos, Samba (`root preexec`) rechaza la conexión cuando la MAC de origen no es una de ellos. Así, aunque alguien consiga la contraseña del iPhone, no puede usarla desde otro equipo.
+5. **Encendido bajo demanda.** `smbd` no arranca con el sistema. El panel lo apaga solo tras N minutos sin sesiones (30 por defecto).
+6. **Panel solo en `127.0.0.1`.** Pide un token que solo puede leer tu usuario (`/run/fileshare/token`) y comprueba el header `Host` para impedir DNS rebinding.
 
 ## Panel (`http://127.0.0.1:8445`, se abre con `compartir panel`)
 
+- **Usuarios:** crear, poner solo lectura o lectura y escritura, vincular dispositivos, deshabilitar, generar nueva contraseña y eliminar. Cada usuario muestra sus propias métricas: logins correctos y fallidos, archivos escritos, leídos y borrados, y bytes subidos y bajados.
 - Whitelist de dispositivos: estado (conectado / en la red / fuera), IP actual, último uso y tráfico subido y descargado. Se pueden revocar.
 - Intentos bloqueados, cada uno con botón **Aprobar**. Así se agrega un dispositivo nuevo.
 - Sesiones activas: dialecto SMB, cifrado, firma y archivos abiertos. Se pueden expulsar.
@@ -50,7 +52,7 @@ Luego:
 
 ```sh
 sudo nixos-rebuild switch --flake .#<host>
-sudo smbpasswd -a alecor
+compartir panel   # crea los usuarios
 ```
 
 ### Arch, Debian/Ubuntu, Fedora u otra distro con systemd
@@ -62,8 +64,8 @@ sudo pacman -S --needed samba python iptables-nft iproute2 curl jq
 sudo apt install samba python3 iptables iproute2 curl jq
 
 sudo ./linux/install.sh "$USER"        # nombre de carpeta opcional; por defecto ~/Compartida
-sudo smbpasswd -a "$USER"
-compartir on && compartir panel
+compartir panel   # crea los usuarios
+compartir on
 ```
 
 El instalador hace un respaldo del `/etc/samba/smb.conf` que ya tengas antes de reemplazarlo. Para desinstalar: `sudo ./linux/install.sh --uninstall`.
@@ -80,12 +82,23 @@ Si usas **firewalld** o **ufw**, tienes que abrir 445/tcp en ellos. El filtrado 
 
 Lo razonable sería separar en `panel.py` un "backend" por sistema operativo (firewall, servicio, sesiones, logs) y dejar la API y la interfaz iguales.
 
-## Conectar el iPhone
+## Usuarios
 
-1. `compartir on`
-2. Archivos → **···** → *Conectarse al servidor* → `smb://<host>.local` o `smb://<ip>` (el panel muestra las dos).
-3. *Usuario registrado* → tu usuario y la contraseña SMB.
+Cada usuario SMB es un usuario Unix de sistema, sin login ni home, del grupo `fileshare`. Lo crea el panel con `useradd` y `smbpasswd`. En NixOS esto requiere `users.mutableUsers = true`, que es el valor por defecto.
+
+- Todo lo que suben se guarda a nombre del dueño de la carpeta (`force user`), así que desde la laptop los archivos se ven como tuyos.
+- La contraseña, si no escribes una, se genera con el formato `xxxx-xxxx-xxxx` y **se muestra una sola vez**.
+- Los usuarios en solo lectura van a `read list`; los deshabilitados, a `invalid users` y además `smbpasswd -d`.
+- Cambiar permisos, deshabilitar o cambiar la contraseña cierra las sesiones de ese usuario para que el cambio aplique de inmediato.
+
+## Conectar un dispositivo
+
+1. En el panel, crea su usuario (por ejemplo `iphone`).
+2. `compartir on`
+3. **iPhone:** Archivos → **···** → *Conectarse al servidor* → `smb://<host>.local` o `smb://<ip>` → *Usuario registrado* → `iphone` y su contraseña.
+   **Windows:** Explorador → `\\<host>.local\Compartida`, o *Conectar a unidad de red*, con el usuario y la contraseña.
 4. El primer intento de un dispositivo nuevo falla a propósito. Aparece en **Intentos bloqueados**; lo apruebas y vuelves a intentar.
+5. Opcional: vincula el dispositivo a su usuario para que esa contraseña solo funcione desde él.
 
 Notas:
 
