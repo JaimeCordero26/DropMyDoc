@@ -2,7 +2,7 @@
 
 Corre como root (necesita iptables, systemctl, smbcontrol y useradd). Escucha
 solo en 127.0.0.1 y exige un token (header X-Token) para toda la API; el token
-se escribe en /run/fileshare/token, legible solo por el usuario dueño.
+se escribe en /run/dropmydoc/token, legible solo por el usuario dueño.
 
 Con `--check USUARIO IP` actúa como `root preexec` de Samba: permite o rechaza
 la conexión según el usuario esté habilitado y, si tiene dispositivos
@@ -24,16 +24,16 @@ import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-USER = os.environ.get("FILESHARE_USER", "alecor")
-SHARE = os.environ.get("FILESHARE_SHARE", "Compartida")
-SHARE_PATH = os.environ.get("FILESHARE_PATH", f"/home/{USER}/{SHARE}")
-STATE_DIR = os.environ.get("FILESHARE_STATE", "/var/lib/fileshare")
-RUN_DIR = os.environ.get("FILESHARE_RUN", "/run/fileshare")
-PORT = int(os.environ.get("FILESHARE_PORT", "8445"))
-HOST = os.environ.get("FILESHARE_HOST", os.uname().nodename)
-SMBD_UNIT = os.environ.get("FILESHARE_SMBD_UNIT", "samba-smbd")
+USER = os.environ.get("DROPMYDOC_USER", "alecor")
+SHARE = os.environ.get("DROPMYDOC_SHARE", "DropMyDoc")
+SHARE_PATH = os.environ.get("DROPMYDOC_PATH", f"/home/{USER}/{SHARE}")
+STATE_DIR = os.environ.get("DROPMYDOC_STATE", "/var/lib/dropmydoc")
+RUN_DIR = os.environ.get("DROPMYDOC_RUN", "/run/dropmydoc")
+PORT = int(os.environ.get("DROPMYDOC_PORT", "8445"))
+HOST = os.environ.get("DROPMYDOC_HOST", os.uname().nodename)
+SMBD_UNIT = os.environ.get("DROPMYDOC_SMBD_UNIT", "samba-smbd")
 HTML_PATH = os.environ.get(
-    "FILESHARE_HTML", os.path.join(os.path.dirname(__file__), "panel.html")
+    "DROPMYDOC_HTML", os.path.join(os.path.dirname(__file__), "panel.html")
 )
 
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -41,15 +41,15 @@ SMB_GLOBAL_CONF = os.path.join(STATE_DIR, "smb-global.conf")
 SMB_SHARE_CONF = os.path.join(STATE_DIR, "smb-share.conf")
 TOKEN_FILE = os.path.join(RUN_DIR, "token")
 
-SMB_GROUP = "fileshare"
+SMB_GROUP = "dropmydoc"
 USER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 PASS_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
-CHECK_TAG = "compartir-check"
+CHECK_TAG = "dropmydoc-check"
 
-CHAIN = "fileshare"
-ACCT_IN = "fileshare-acct-in"
-ACCT_OUT = "fileshare-acct-out"
-LOG_PREFIX = "FILESHARE-DENY "
+CHAIN = "dropmydoc"
+ACCT_IN = "dropmydoc-acct-in"
+ACCT_OUT = "dropmydoc-acct-out"
+LOG_PREFIX = "DROPMYDOC-DENY "
 MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
 
 lock = threading.RLock()
@@ -564,7 +564,7 @@ def create_user(name, label, perm, password):
         created = True
         if not ok("useradd", "--system", "--no-create-home", "--home-dir", "/var/empty",
                   "--shell", nologin_shell(), "--gid", SMB_GROUP,
-                  "--comment", f"compartir: {label}", name):
+                  "--comment", f"dropmydoc: {label}", name):
             return "no se pudo crear el usuario del sistema"
     if not set_smb_password(name, password):
         if created:
@@ -609,7 +609,7 @@ def check_main(user, ip):
         pass
     reason = None
     if not u:
-        reason = "usuario no gestionado por compartir"
+        reason = "usuario no gestionado por dropmydoc"
     elif not u.get("enabled", True):
         reason = "usuario deshabilitado"
     elif u.get("devices") and ip != "127.0.0.1" and mac not in u["devices"]:
@@ -873,7 +873,7 @@ def api(method, path, body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "fileshare"
+    server_version = "dropmydoc"
 
     def log_message(self, *a):
         pass

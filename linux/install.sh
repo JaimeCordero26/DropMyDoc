@@ -7,12 +7,12 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PREFIX=/opt/compartir
-UNIT_FILE=/etc/systemd/system/fileshare-panel.service
+PREFIX=/opt/dropmydoc
+UNIT_FILE=/etc/systemd/system/dropmydoc.service
 SMB_CONF=/etc/samba/smb.conf
-STATE_DIR=/var/lib/fileshare
+STATE_DIR=/var/lib/dropmydoc
 PORT=8445
-MARK="# gestionado por compartir"
+MARK="# gestionado por dropmydoc"
 
 die() { echo "error: $*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "ejecuta con sudo"
@@ -26,19 +26,19 @@ smbd_unit() {
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-  systemctl disable --now fileshare-panel 2>/dev/null || true
+  systemctl disable --now dropmydoc 2>/dev/null || true
   systemctl stop "$(smbd_unit)" 2>/dev/null || true
   for c in INPUT OUTPUT; do
-    while iptables -S "$c" | grep -q fileshare; do
-      rule=$(iptables -S "$c" | grep fileshare | head -1 | sed 's/^-A /-D /')
+    while iptables -S "$c" | grep -q dropmydoc; do
+      rule=$(iptables -S "$c" | grep dropmydoc | head -1 | sed 's/^-A /-D /')
       eval iptables "$rule"
     done
   done
-  for ch in fileshare fileshare-acct-in fileshare-acct-out; do
+  for ch in dropmydoc dropmydoc-acct-in dropmydoc-acct-out; do
     iptables -F "$ch" 2>/dev/null || true
     iptables -X "$ch" 2>/dev/null || true
   done
-  rm -rf "$PREFIX" "$UNIT_FILE" /usr/local/bin/compartir
+  rm -rf "$PREFIX" "$UNIT_FILE" /usr/local/bin/dmd
   systemctl daemon-reload
   if grep -q "$MARK" "$SMB_CONF" 2>/dev/null; then
     last=$(ls -t "$SMB_CONF".bak-* 2>/dev/null | head -1 || true)
@@ -51,7 +51,7 @@ fi
 USER_NAME="${1:-${SUDO_USER:-}}"
 [ -n "$USER_NAME" ] || die "uso: sudo $0 <usuario> [nombre-carpeta]"
 id "$USER_NAME" >/dev/null 2>&1 || die "el usuario $USER_NAME no existe"
-SHARE="${2:-Compartida}"
+SHARE="${2:-DropMyDoc}"
 HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
 SHARE_PATH="$HOME_DIR/$SHARE"
 GROUP=$(id -gn "$USER_NAME")
@@ -65,12 +65,12 @@ done
 echo "→ archivos en $PREFIX"
 install -d "$PREFIX"
 install -m 0644 "$REPO/panel/panel.py" "$REPO/panel/panel.html" "$PREFIX/"
-install -m 0755 "$REPO/bin/compartir" /usr/local/bin/compartir
+install -m 0755 "$REPO/bin/dmd" /usr/local/bin/dmd
 
 echo "→ carpeta $SHARE_PATH"
 install -d -o "$USER_NAME" -g "$GROUP" -m 0755 "$SHARE_PATH"
 install -d -m 0755 "$STATE_DIR"
-getent group fileshare >/dev/null || groupadd --system fileshare
+getent group dropmydoc >/dev/null || groupadd --system dropmydoc
 
 echo "→ $SMB_CONF"
 install -d /etc/samba
@@ -103,7 +103,7 @@ $MARK
 
 [$SHARE]
   path = $SHARE_PATH
-  valid users = @fileshare
+  valid users = @dropmydoc
   force user = $USER_NAME
   force group = $GROUP
   root preexec = $(command -v python3) $PREFIX/panel.py --check %U %I
@@ -127,7 +127,7 @@ $MARK
   include = $STATE_DIR/smb-share.conf
 EOF
 
-echo "→ servicio fileshare-panel (smbd: $UNIT.service, sin autoarranque)"
+echo "→ servicio dropmydoc (smbd: $UNIT.service, sin autoarranque)"
 systemctl disable --now "$UNIT" nmb 2>/dev/null || true
 cat > "$UNIT_FILE" <<EOF
 [Unit]
@@ -136,18 +136,18 @@ After=network.target
 
 [Service]
 ExecStart=$(command -v python3) -u $PREFIX/panel.py
-Environment=FILESHARE_USER=$USER_NAME
-Environment=FILESHARE_SHARE=$SHARE
-Environment=FILESHARE_PATH=$SHARE_PATH
-Environment=FILESHARE_STATE=$STATE_DIR
-Environment=FILESHARE_PORT=$PORT
-Environment=FILESHARE_HOST=$HOSTNAME_
-Environment=FILESHARE_HTML=$PREFIX/panel.html
-Environment=FILESHARE_SMBD_UNIT=$UNIT
+Environment=DROPMYDOC_USER=$USER_NAME
+Environment=DROPMYDOC_SHARE=$SHARE
+Environment=DROPMYDOC_PATH=$SHARE_PATH
+Environment=DROPMYDOC_STATE=$STATE_DIR
+Environment=DROPMYDOC_PORT=$PORT
+Environment=DROPMYDOC_HOST=$HOSTNAME_
+Environment=DROPMYDOC_HTML=$PREFIX/panel.html
+Environment=DROPMYDOC_SMBD_UNIT=$UNIT
 Restart=always
 RestartSec=2
-StateDirectory=fileshare
-RuntimeDirectory=fileshare
+StateDirectory=dropmydoc
+RuntimeDirectory=dropmydoc
 ProtectHome=read-only
 PrivateTmp=true
 
@@ -155,14 +155,14 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now fileshare-panel
+systemctl enable --now dropmydoc
 
 cat <<EOF
 
 Listo. Pasos siguientes:
-  1. compartir panel  → crea un usuario por dispositivo (iphone, windows, ...)
-  2. compartir on
+  1. dmd panel  → crea un usuario por dispositivo (iphone, windows, ...)
+  2. dmd on
 
 Si usas firewalld o ufw, esos firewalls también deben permitir el puerto 445/tcp;
-el filtrado por MAC lo sigue haciendo compartir.
+el filtrado por MAC lo sigue haciendo dropmydoc.
 EOF

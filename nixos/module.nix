@@ -1,6 +1,6 @@
 # Módulo NixOS: carpeta compartida SMB bajo demanda con whitelist por MAC y panel local.
 #
-#   services.compartir = {
+#   services.dropmydoc = {
 #     enable = true;
 #     user = "alecor";
 #   };
@@ -10,18 +10,18 @@
   pkgs,
   ...
 }: let
-  cfg = config.services.compartir;
+  cfg = config.services.dropmydoc;
   sharePath = "/home/${cfg.user}/${cfg.shareName}";
-  stateDir = "/var/lib/fileshare";
+  stateDir = "/var/lib/dropmydoc";
 
-  compartir = pkgs.writeShellApplication {
-    name = "compartir";
+  dropmydoc = pkgs.writeShellApplication {
+    name = "dmd";
     runtimeInputs = [pkgs.curl pkgs.jq pkgs.xdg-utils];
-    runtimeEnv.FILESHARE_PORT = toString cfg.port;
-    text = builtins.readFile ../bin/compartir;
+    runtimeEnv.DROPMYDOC_PORT = toString cfg.port;
+    text = builtins.readFile ../bin/dmd;
   };
 in {
-  options.services.compartir = {
+  options.services.dropmydoc = {
     enable = lib.mkEnableOption "carpeta compartida SMB bajo demanda";
     user = lib.mkOption {
       type = lib.types.str;
@@ -29,7 +29,7 @@ in {
     };
     shareName = lib.mkOption {
       type = lib.types.str;
-      default = "Compartida";
+      default = "DropMyDoc";
       description = "Nombre del recurso SMB y de la carpeta en el home del usuario.";
     };
     port = lib.mkOption {
@@ -42,7 +42,7 @@ in {
   config = lib.mkIf cfg.enable {
     services.samba = {
       enable = true;
-      openFirewall = false; # el acceso lo controla fileshare-panel por MAC
+      openFirewall = false; # el acceso lo controla dropmydoc por MAC
       nmbd.enable = false;
       winbindd.enable = false;
       settings = {
@@ -71,7 +71,7 @@ in {
         ${cfg.shareName} = {
           "path" = sharePath;
           # usuarios SMB creados desde el panel; los archivos quedan a nombre del dueño
-          "valid users" = "@fileshare";
+          "valid users" = "@dropmydoc";
           "force user" = cfg.user;
           "force group" = config.users.users.${cfg.user}.group;
           # rechaza usuarios deshabilitados o que entran desde un dispositivo no vinculado
@@ -103,17 +103,17 @@ in {
     systemd.targets.samba.wantedBy = lib.mkForce [];
     systemd.services.samba-smbd = {
       wantedBy = lib.mkForce [];
-      after = ["fileshare-panel.service"];
-      wants = ["fileshare-panel.service"];
+      after = ["dropmydoc.service"];
+      wants = ["dropmydoc.service"];
     };
 
-    users.groups.fileshare = {};
+    users.groups.dropmydoc = {};
 
     systemd.tmpfiles.rules = [
       "d ${sharePath} 0755 ${cfg.user} users -"
     ];
 
-    systemd.services.fileshare-panel = {
+    systemd.services.dropmydoc = {
       description = "Panel y control de acceso de la carpeta compartida SMB";
       wantedBy = ["multi-user.target"];
       after = ["network.target" "firewall.service"];
@@ -127,26 +127,26 @@ in {
         pkgs.shadow
       ];
       environment = {
-        FILESHARE_USER = cfg.user;
-        FILESHARE_SHARE = cfg.shareName;
-        FILESHARE_PATH = sharePath;
-        FILESHARE_STATE = stateDir;
-        FILESHARE_PORT = toString cfg.port;
-        FILESHARE_HOST = config.networking.hostName;
-        FILESHARE_HTML = "${../panel/panel.html}";
-        FILESHARE_SMBD_UNIT = "samba-smbd";
+        DROPMYDOC_USER = cfg.user;
+        DROPMYDOC_SHARE = cfg.shareName;
+        DROPMYDOC_PATH = sharePath;
+        DROPMYDOC_STATE = stateDir;
+        DROPMYDOC_PORT = toString cfg.port;
+        DROPMYDOC_HOST = config.networking.hostName;
+        DROPMYDOC_HTML = "${../panel/panel.html}";
+        DROPMYDOC_SMBD_UNIT = "samba-smbd";
       };
       serviceConfig = {
         ExecStart = "${pkgs.python3}/bin/python3 -u ${../panel/panel.py}";
         Restart = "always";
         RestartSec = 2;
-        StateDirectory = "fileshare";
-        RuntimeDirectory = "fileshare";
+        StateDirectory = "dropmydoc";
+        RuntimeDirectory = "dropmydoc";
         ProtectHome = "read-only";
         PrivateTmp = true;
       };
     };
 
-    environment.systemPackages = [compartir];
+    environment.systemPackages = [dropmydoc];
   };
 }
